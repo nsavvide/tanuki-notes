@@ -26,6 +26,9 @@ Needs CMake, Ninja, a C++23 compiler, OpenGL 3.3 and poppler-cpp
 | Zoom out one level | Esc (with nothing selected), or click the level badge |
 | Fit everything | Home or Shift+1 |
 | Jump to a parent | click it in the breadcrumb (top left) |
+| Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
+| Attach an arrow | start or end it on a shape; it follows when the shape moves or resizes |
+| Detach an arrow | drag its end off the shape, or move the arrow by itself |
 | Label a shape / edit text | double-click |
 | New text | double-click empty space, or T |
 | Insert image or PDF | 9, drag and drop a file, or paste an image |

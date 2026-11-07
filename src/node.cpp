@@ -102,8 +102,15 @@ std::string display_name(const Node& node) {
         return first.size() > 40 ? first.substr(0, 40) + "…" : first;
     }
     if (!node.asset.empty()) {
+        // assets/<name>-<id6>.<ext> -> <name>.<ext>
         auto slash = node.asset.find_last_of('/');
-        return node.asset.substr(slash == std::string::npos ? 0 : slash + 1);
+        std::string file = node.asset.substr(slash == std::string::npos ? 0 : slash + 1);
+        auto dot = file.find_last_of('.');
+        auto dash = file.rfind('-', dot);
+        if (dash != std::string::npos && dot != std::string::npos && dot - dash == 7) {
+            file.erase(dash, 7);
+        }
+        return file;
     }
     return kind_name(node.kind);
 }
@@ -153,6 +160,12 @@ json node_to_json(const Node& n, bool recursive) {
     if (n.kind == Kind::PdfPage) {
         j["page"] = n.page;
     }
+    if (!n.start_bind.empty()) {
+        j["start_bind"] = n.start_bind;
+    }
+    if (!n.end_bind.empty()) {
+        j["end_bind"] = n.end_bind;
+    }
     if (recursive && !n.children.empty()) {
         json kids = json::array();
         for (const auto& c : n.children) {
@@ -191,6 +204,8 @@ std::unique_ptr<Node> node_from_json(const json& j) {
     }
     n->asset = j.value("asset", "");
     n->page = j.value("page", 0);
+    n->start_bind = j.value("start_bind", "");
+    n->end_bind = j.value("end_bind", "");
     if (j.contains("children")) {
         for (const auto& c : j["children"]) {
             add_child(*n, node_from_json(c));

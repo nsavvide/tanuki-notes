@@ -139,6 +139,11 @@ int main(int argc, char** argv) {
             app.update(0, 1280, 800);
             app.key_down(SDLK_A, {false, true, false});
         }
+        if (const char* q = std::getenv("TANUKI_SNAPSHOT_SEARCH")) {
+            app.update(0, 1280, 800);
+            app.key_down(SDLK_F, {false, true, false});
+            app.text_input(q);
+        }
         code = snapshot(vg, window, app, args[1].c_str());
     } else {
         App app(vg, window, map_dir);

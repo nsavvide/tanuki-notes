@@ -32,7 +32,7 @@ enum class Icon {
     Hand, Select, Rect, Diamond, Ellipse, Arrow, Line, Draw, Text, Image,
     Eraser, Undo, Redo, Plus, Minus, Trash, Duplicate, ToFront, ToBack, Git,
     Hachure, CrossHatch, Solid, Thin, Bold, ExtraBold, Architect, Artist,
-    Cartoonist,
+    Cartoonist, Search,
 };
 
 // White rounded panel with a soft shadow.

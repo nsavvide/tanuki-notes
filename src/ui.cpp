@@ -262,6 +262,10 @@ void icon(NVGcontext* vg, Icon which, Rect box, NVGcolor c) {
         nvgBezierTo(vg, 7, 16, 9, 6, 12, 7);
         nvgBezierTo(vg, 14, 8, 15, 5, 17, 5);
         break;
+    case Icon::Search:
+        nvgCircle(vg, 8.5f, 8.5f, 5.5f);
+        line_(12.5f, 12.5f, 16.5f, 16.5f);
+        break;
     case Icon::Cartoonist:
         nvgMoveTo(vg, 3, 15);
         nvgBezierTo(vg, 5, 18, 6, 6, 9, 9);

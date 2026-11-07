@@ -56,6 +56,22 @@ int Assets::pdf_page_count(const std::string& asset) {
     return d ? d->pages() : 0;
 }
 
+const std::string& Assets::pdf_page_text(const std::string& asset, int page) {
+    auto key = std::make_pair(asset, page);
+    auto it = page_text_.find(key);
+    if (it == page_text_.end()) {
+        std::string text;
+        poppler::document* d = doc(asset);
+        if (d && page >= 0 && page < d->pages()) {
+            std::unique_ptr<poppler::page> p(d->create_page(page));
+            auto bytes = p->text().to_utf8();
+            text.assign(bytes.begin(), bytes.end());
+        }
+        it = page_text_.emplace(key, std::move(text)).first;
+    }
+    return it->second;
+}
+
 std::pair<double, double> Assets::pdf_page_size(const std::string& asset,
                                                 int page) {
     poppler::document* d = doc(asset);
@@ -133,8 +149,13 @@ const Texture* Assets::pdf_page(const std::string& asset, int page,
 }
 
 std::string Assets::import(const fs::path& source) {
+    // Keep a readable, searchable name: assets/<name>-<short id>.<ext>
+    std::string stem;
+    for (char c : source.stem().string()) {
+        stem += std::isalnum((unsigned char)c) || c == '-' || c == '_' ? c : '-';
+    }
     std::string ext = source.extension().string();
-    std::string rel = "assets/" + new_id() + ext;
+    std::string rel = "assets/" + stem.substr(0, 40) + "-" + new_id().substr(0, 6) + ext;
     fs::create_directories(dir_ / "assets");
     fs::copy_file(source, dir_ / rel);
     return rel;

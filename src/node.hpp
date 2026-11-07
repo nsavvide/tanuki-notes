@@ -44,6 +44,8 @@ struct Node {
     std::vector<Vec2> points; // Line/Arrow/Draw: normalized 0..1 in bbox
     std::string asset;        // Image/Pdf: path relative to the map folder
     int page = 0;             // PdfPage: page index
+    std::string start_bind;   // Line/Arrow: id of the shape the start is
+    std::string end_bind;     // attached to, and the end
     uint32_t seed = 1;        // keeps the hand-drawn wobble stable
 
     Node* parent = nullptr;

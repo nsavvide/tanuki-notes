@@ -48,7 +48,7 @@ class App {
 
     // True while something animates or waits (so the loop keeps drawing).
     bool busy() const {
-        return flying_ || editing_ || drag_ != Drag::None || dirty_ ||
+        return flying_ || editing_ || search_open_ || drag_ != Drag::None || dirty_ ||
                assets_.busy() || now_ < toast_until_;
     }
 
@@ -72,7 +72,15 @@ class App {
     };
     enum class Drag { None, Pan, Create, Move, Resize, Band, Erase, Endpoint };
 
+    struct SearchResult {
+        Node* node;
+        std::string title, detail;
+        int score;
+        int depth;
+    };
+
     // Geometry helpers.
+    std::pair<Node*, Xform> draw_root() const;
     std::optional<Xform> xform_of(const Node* n) const;
     std::optional<Rect> screen_rect_of(const Node* n) const;
     Node* pick(Vec2 p);
@@ -84,6 +92,18 @@ class App {
     void reparent(Node& n, Node& new_parent);
     void set_linear_points(Node& n, const std::vector<Vec2>& local_pts);
     std::vector<Vec2> linear_local_points(const Node& n) const;
+
+    // Arrows and lines attached to shapes.
+    Node* bind_target_at(Vec2 p, const Node* exclude);
+    void bind_endpoints(Node& n);
+    void update_bindings();
+
+    // Search.
+    void open_search();
+    void close_search();
+    void run_search();
+    void search_go(int index);
+    void draw_search();
 
     // Editing.
     void start_create(Vec2 p, Mods m);
@@ -181,6 +201,12 @@ class App {
     std::string fly_id_;
     bool fly_content_ = false;
     bool flying_ = false;
+
+    bool search_open_ = false;
+    std::string search_query_;
+    std::vector<SearchResult> search_results_;
+    int search_sel_ = 0;
+    Rect search_panel_;
 
     std::string toast_;
     double toast_until_ = 0;

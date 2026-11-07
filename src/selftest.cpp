@@ -5,6 +5,7 @@
 // `tanuki-notes --make-demo <dir>`: builds a small example map.
 
 #include "app.hpp"
+#include "render.hpp"
 #include "store.hpp"
 
 #include <nlohmann/json.hpp>
@@ -175,6 +176,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         app.undo();
         tick(app);
         big = app.root().children[0].get();
+        small = big->children[0].get();
 
         // Eraser removes what it touches.
         app.set_tool(Tool::Line);
@@ -211,6 +213,30 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         CHECK(!doc->children.empty() && near(doc->children[0]->aspect(), 0.5, 1e-9));
         fs::remove(pdf);
 
+        // Search finds the "Rust" label and flies to it.
+        app.selection_.clear();
+        app.key_down(SDLK_F, {false, true, false});
+        type(app, "rus");
+        CHECK(!app.search_results_.empty() &&
+              app.search_results_[0].node->text == "Rust");
+        app.key_down(SDLK_RETURN, {});
+        CHECK(!app.search_open_ && app.flying_);
+        for (int i = 0; i < 600 && app.flying_; ++i) {
+            tick(app);
+        }
+        auto found_r = app.screen_rect_of(small);
+        CHECK(found_r && near(found_r->center().x, 640, 1) &&
+              near(found_r->center().y, 400, 1));
+        CHECK(app.selection().size() == 1 && app.selection()[0] == small);
+
+        // Search also looks inside PDFs (the test page has no text, so this
+        // just exercises the path) and by file name.
+        app.key_down(SDLK_F, {false, true, false});
+        type(app, "tanuki-test");
+        CHECK(!app.search_results_.empty());
+        app.key_down(SDLK_ESCAPE, {});
+        CHECK(!app.search_open_);
+
         // Draw a few frames through every code path (smoke test).
         for (int i = 0; i < 5; ++i) {
             tick(app);
@@ -228,6 +254,53 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         CHECK(store::git_commit(dir) == "Nothing to commit");
         std::println("map written to {}", dir.string());
     }
+
+    // Arrows attached to shapes follow them.
+    fs::path dir2 = dir;
+    dir2 += "-bind";
+    fs::remove_all(dir2);
+    {
+        App app(vg, window, dir2);
+        tick(app);
+        app.set_tool(Tool::Rect);
+        drag(app, {100, 100}, {300, 250});
+        app.set_tool(Tool::Ellipse);
+        drag(app, {700, 100}, {900, 250});
+        Node* a = app.root().children[0].get();
+        Node* b = app.root().children[1].get();
+        app.set_tool(Tool::Arrow);
+        drag(app, {250, 175}, {800, 175});
+        Node* arrow = app.root().children[2].get();
+        CHECK(arrow->kind == Kind::Arrow);
+        CHECK(arrow->start_bind == a->id && arrow->end_bind == b->id);
+        tick(app);
+        auto pts = screen_points(*arrow, *app.xform_of(arrow));
+        CHECK(pts.front().x > 300 && pts.front().x < 320); // just right of a
+        CHECK(pts.back().x > 680 && pts.back().x < 700);   // just left of b
+
+        // Move b down: the arrow end follows onto b's outline.
+        click(app, {1200, 700});
+        drag(app, {800, 100}, {800, 400});
+        tick(app);
+        pts = screen_points(*arrow, *app.xform_of(arrow));
+        auto br = app.screen_rect_of(b);
+        CHECK(br && near(br->y, 400));
+        CHECK(pts.back().y > 400 && pts.back().y < br->center().y);
+
+        // Survives save/load.
+        app.flush();
+        auto loaded = store::load(dir2);
+        CHECK(loaded->children.size() == 3 &&
+              loaded->children[2]->end_bind == b->id);
+
+        // Moving the arrow on its own detaches it.
+        click(app, {1200, 700});
+        Vec2 mid = (pts.front() + pts.back()) * 0.5;
+        drag(app, mid, mid + Vec2{0, 60});
+        CHECK(arrow->start_bind.empty() && arrow->end_bind.empty());
+    }
+    fs::remove_all(dir2);
+
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);
         return 1;

@@ -33,6 +33,8 @@ class Assets {
     const Texture* pdf_page(const std::string& asset, int page, double want_px);
 
     int pdf_page_count(const std::string& asset);
+    // Plain text of a page (cached), for search.
+    const std::string& pdf_page_text(const std::string& asset, int page);
     // Page size in points; {0,0} if unknown.
     std::pair<double, double> pdf_page_size(const std::string& asset, int page);
 
@@ -58,4 +60,5 @@ class Assets {
     std::map<std::string, Texture> images_;
     std::map<std::tuple<std::string, int, int>, Texture> pages_;
     std::map<std::string, std::unique_ptr<poppler::document>> docs_;
+    std::map<std::pair<std::string, int>, std::string> page_text_;
 };
