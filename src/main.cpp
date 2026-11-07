@@ -1,192 +1,212 @@
-#include "node.hpp"
+#include "app.hpp"
+#include "text.hpp"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_events.h>
-#include <SDL3/SDL_init.h>
-#include <SDL3/SDL_rect.h>
-#include <SDL3/SDL_render.h>
-#include <SDL3/SDL_video.h>
-#include <algorithm>
-#include <cmath>
-#include <format>
-#include <memory>
+
+#define GL_GLEXT_PROTOTYPES
+#include <GL/gl.h>
+#include <GL/glext.h>
+
+#define NANOVG_GL3_IMPLEMENTATION
+#include <nanovg.h>
+#include <nanovg_gl.h>
+#include <nanovg_gl_utils.h>
+
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <print>
 #include <string>
+#include <vector>
 
-struct Camera {
-    double x = 0, y = 0, scale = 1; // top left
-    double to_screen_x(double world_x) const { return (world_x - x) * scale; }
-    double to_screen_y(double world_y) const { return (world_y - y) * scale; }
-    double to_world_x(double screen_x) const { return screen_x / scale + x; }
-    double to_world_y(double screen_y) const { return screen_y / scale + y; }
-};
+int run_selftest(NVGcontext* vg, SDL_Window* window);
+void make_demo(App& app);
 
-// Where a node's local space lands on screen:
-// local (qx, qy) -> screen (ox + qx * s, oy + qy * s)
-struct Xform {
-    double ox, oy, s;
-};
+namespace {
 
-// The anchor's placement comes straight from the camera.
-Xform anchor_xform(const Camera& camera) {
-    return {camera.to_screen_x(0), camera.to_screen_y(0), camera.scale};
+std::filesystem::path default_map_dir() {
+    const char* home = std::getenv("HOME");
+    return std::filesystem::path(home ? home : ".") / "tanuki";
 }
 
-// Parent placement + child's fractions -> child placement.
-Xform child_xform(Xform parent, const Node& child) {
-    return {parent.ox + child.x * parent.s, parent.oy + child.y * parent.s,
-            parent.s * child.w};
+Mods mods() {
+    SDL_Keymod m = SDL_GetModState();
+    return {(m & SDL_KMOD_SHIFT) != 0, (m & SDL_KMOD_CTRL) != 0,
+            (m & SDL_KMOD_ALT) != 0};
 }
 
-void draw(SDL_Renderer* renderer, const Node& node, Xform t, int window_w,
-          int window_h) {
-    double height = node.h / node.w * t.s;
+// Renders `frames` frames of the map into an offscreen buffer and writes a
+// PNG. Used to check rendering without a visible window.
+int snapshot(NVGcontext* vg, SDL_Window* window, App& app, const char* out) {
+    int w, h;
+    SDL_GetWindowSize(window, &w, &h);
+    NVGLUframebuffer* fb = nvgluCreateFramebuffer(vg, w, h, 0);
+    if (!fb) {
+        std::println(stderr, "framebuffer failed");
+        return 1;
+    }
+    for (int i = 0; i < 40; ++i) {
+        nvgluBindFramebuffer(fb);
+        glViewport(0, 0, w, h);
+        glClearColor(1, 1, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        app.update(i / 60.0, w, h);
+        app.render(1);
+    }
+    std::vector<unsigned char> px(size_t(w) * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    nvgluBindFramebuffer(nullptr);
+    SDL_Surface* s = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGBA32);
+    for (int y = 0; y < h; ++y) { // GL rows are bottom-up
+        std::memcpy((unsigned char*)s->pixels + size_t(y) * s->pitch,
+                    &px[size_t(h - 1 - y) * w * 4], size_t(w) * 4);
+    }
+    bool ok = SDL_SavePNG(s, out);
+    SDL_DestroySurface(s);
+    nvgluDeleteFramebuffer(fb);
+    return ok ? 0 : 1;
+}
 
-    // Culling: children sit inside their parent, so if this box is
-    // off-screen or smaller than a pixel, its whole subtree is too.
-    bool off_screen = t.ox + t.s < 0 || t.ox > window_w || t.oy + height < 0 ||
-                      t.oy > window_h;
-    if (off_screen || t.s < 1) {
-        return;
+} // namespace
+
+int main(int argc, char** argv) {
+    std::vector<std::string> args(argv + 1, argv + argc);
+    bool selftest = !args.empty() && args[0] == "--selftest";
+    bool snap = args.size() >= 2 && args[0] == "--snapshot";
+    bool demo = args.size() >= 2 && args[0] == "--make-demo";
+    bool headless = selftest || snap || demo;
+
+    std::filesystem::path map_dir = default_map_dir();
+    if (snap && args.size() >= 3) {
+        map_dir = args[2];
+    } else if (demo) {
+        map_dir = args[1];
+    } else if (!headless && !args.empty()) {
+        map_dir = args[0];
     }
 
-    SDL_FRect rect{float(t.ox), float(t.oy), float(t.s), float(height)};
-    SDL_SetRenderDrawColor(renderer, node.color.r, node.color.g, node.color.b,
-                           node.color.a);
-    SDL_RenderFillRect(renderer, &rect);
-
-    for (const auto& child : node.children) {
-        draw(renderer, *child, child_xform(t, *child), window_w, window_h);
-    }
-}
-
-bool covers_window(const Node& node, Xform t, int window_w, int window_h) {
-    double left = t.ox;
-    double right = t.ox + t.s;
-    double top = t.oy;
-    double bottom = t.oy + node.h / node.w * t.s;
-
-    return left <= 0 && right >= window_w && top <= 0 && bottom >= window_h;
-}
-
-int depth(const Node* node) {
-    int depth = 0;
-    while (node->parent) {
-        depth++;
-        node = node->parent;
-    }
-
-    return depth;
-}
-
-// Keeps `anchor` = the deepest node that covers the whole window, and keeps
-// the camera's numbers in that node's local units. This is what makes zoom
-// depth unlimited: the camera never measures anything from the root.
-void reroot(Camera& camera, Node*& anchor, int window_w, int window_h) {
-    // Up: the anchor no longer fills the window -> hand over to its parent.
-    while (anchor->parent &&
-           !covers_window(*anchor, anchor_xform(camera), window_w, window_h)) {
-        const Node& a = *anchor;
-        camera.x = camera.x * a.w + a.x;
-        camera.y = camera.y * a.w + a.y;
-        camera.scale /= a.w;
-        anchor = a.parent;
-    }
-
-    // Down: a child fills the window -> hand over to that child.
-    bool moved = true;
-    while (moved) {
-        moved = false;
-        Xform t = anchor_xform(camera);
-        for (const auto& child : anchor->children) {
-            const Node& c = *child;
-            if (covers_window(c, child_xform(t, c), window_w, window_h)) {
-                camera.x = (camera.x - c.x) / c.w;
-                camera.y = (camera.y - c.y) / c.w;
-                camera.scale *= c.w;
-                anchor = child.get();
-                moved = true;
-                break; // anchor changed: don't keep iterating old children
-            }
-        }
-    }
-}
-
-int main() {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::println(stderr, "SDL_Init: {}", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+    SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
+                            SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (headless) {
+        flags |= SDL_WINDOW_HIDDEN;
+    }
+    SDL_Window* window = SDL_CreateWindow("tanuki-notes", 1280, 800, flags);
+    SDL_GLContext gl = window ? SDL_GL_CreateContext(window) : nullptr;
+    if (!gl) {
+        std::println(stderr, "OpenGL context: {}", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetSwapInterval(1);
+
+    NVGcontext* vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
+    if (!vg || !text::init(vg, TANUKI_ASSET_DIR "/fonts")) {
+        std::println(stderr, "NanoVG or fonts failed to load");
         return 1;
     }
 
-    SDL_Window* window =
-        SDL_CreateWindow("tanuki-notes", 1280, 800, SDL_WINDOW_RESIZABLE);
-
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
-    SDL_SetRenderVSync(renderer, 1);
-
-    auto root = make_test_tree(100);
-
-    Camera camera{0, 0, 400};
-    Node* anchor = root.get();
-    std::string last_title;
-
-    bool running = true;
-    while (running) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            switch (event.type) {
-            case SDL_EVENT_QUIT: {
-                running = false;
-                break;
+    int code = 0;
+    if (selftest) {
+        code = run_selftest(vg, window);
+    } else if (demo) {
+        App app(vg, window, map_dir);
+        make_demo(app);
+        // Extra args: files to insert (images, PDFs) along the right side.
+        for (size_t i = 2; i < args.size(); ++i) {
+            app.update(0, 1280, 800);
+            app.insert_file(args[i], {1150.0, 200.0 + 260.0 * double(i - 2)});
+        }
+        app.flush();
+    } else if (snap) {
+        App app(vg, window, map_dir);
+        if (args.size() >= 6) { // --snapshot out dir x y zoom
+            Vec2 at{std::stod(args[3]), std::stod(args[4])};
+            double steps = 120, k = std::pow(std::stod(args[5]), 1 / steps);
+            for (int i = 0; i < steps; ++i) {
+                app.update(0, 1280, 800);
+                app.camera().zoom_at(at, k);
             }
-            case SDL_EVENT_MOUSE_MOTION: {
-                if (event.motion.state & SDL_BUTTON_LMASK) {
-                    camera.x -= event.motion.xrel / camera.scale;
-                    camera.y -= event.motion.yrel / camera.scale;
+        }
+        if (std::getenv("TANUKI_SNAPSHOT_SELECT")) { // show the style panel
+            app.update(0, 1280, 800);
+            app.key_down(SDLK_A, {false, true, false});
+        }
+        code = snapshot(vg, window, app, args[1].c_str());
+    } else {
+        App app(vg, window, map_dir);
+        std::println("tanuki-notes: map folder {}", map_dir.string());
+        bool running = true;
+        while (running) {
+            // Sleep until something happens unless an animation is running.
+            if (!app.busy()) {
+                SDL_WaitEventTimeout(nullptr, 500);
+            }
+            SDL_Event e;
+            while (SDL_PollEvent(&e)) {
+                switch (e.type) {
+                case SDL_EVENT_QUIT:
+                    running = false;
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                    app.mouse_down({e.button.x, e.button.y}, e.button.button,
+                                   e.button.clicks, mods());
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_UP:
+                    app.mouse_up({e.button.x, e.button.y}, e.button.button, mods());
+                    break;
+                case SDL_EVENT_MOUSE_MOTION:
+                    app.mouse_move({e.motion.x, e.motion.y}, mods());
+                    break;
+                case SDL_EVENT_MOUSE_WHEEL: {
+                    double k = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+                    app.wheel({e.wheel.mouse_x, e.wheel.mouse_y}, e.wheel.x * k,
+                              e.wheel.y * k, mods());
+                    break;
                 }
-                break;
+                case SDL_EVENT_PINCH_UPDATE:
+                    app.pinch(e.pinch.scale);
+                    break;
+                case SDL_EVENT_KEY_DOWN:
+                    app.key_down(e.key.key, mods());
+                    break;
+                case SDL_EVENT_KEY_UP:
+                    app.key_up(e.key.key);
+                    break;
+                case SDL_EVENT_TEXT_INPUT:
+                    app.text_input(e.text.text);
+                    break;
+                case SDL_EVENT_DROP_FILE:
+                    app.drop_file(e.drop.data, {e.drop.x, e.drop.y});
+                    break;
+                default:
+                    break;
+                }
             }
-            case SDL_EVENT_MOUSE_WHEEL: {
-                // keep the world point under the cursor fixed whileooming
-                double mouse_x = event.wheel.mouse_x;
-                double mouse_y = event.wheel.mouse_y;
 
-                double world_x = camera.to_world_x(mouse_x),
-                       world_y = camera.to_world_y(mouse_y);
+            int w, h, pw, ph;
+            SDL_GetWindowSize(window, &w, &h);
+            SDL_GetWindowSizeInPixels(window, &pw, &ph);
+            app.update(SDL_GetTicks() / 1000.0, w, h);
 
-                // hard zoom limits. Max only matters when zooming
-                // into a leaf or an empty gap, where no child takes over.
-                camera.scale = std::clamp(
-                    camera.scale * std::pow(1.15, event.wheel.y), 10.0, 1e9);
-                camera.x = world_x - mouse_x / camera.scale;
-                camera.y = world_y - mouse_y / camera.scale;
-
-                break;
-            }
-            }
+            glViewport(0, 0, pw, ph);
+            glClearColor(1, 1, 1, 1);
+            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            app.render(w > 0 ? float(pw) / float(w) : 1.0f);
+            SDL_GL_SwapWindow(window);
         }
-
-        // every frame: Hyprland resizes the window after creation
-        int window_w, window_h;
-        SDL_GetWindowSize(window, &window_w, &window_h);
-
-        reroot(camera, anchor, window_w, window_h);
-
-        SDL_SetRenderDrawColor(renderer, 250, 250, 250, 255);
-        SDL_RenderClear(renderer);
-        draw(renderer, *anchor, anchor_xform(camera), window_w, window_h);
-
-        std::string title = std::format("depth: {} | scale {:.0f}",
-                                        depth(anchor), camera.scale);
-        if (title != last_title) {
-            SDL_SetWindowTitle(window, title.c_str());
-            std::println("{}", title);
-            last_title = title;
-        }
-
-        SDL_RenderPresent(renderer);
     }
 
-    SDL_DestroyRenderer(renderer);
+    nvgDeleteGL3(vg);
+    SDL_GL_DestroyContext(gl);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    return code;
 }

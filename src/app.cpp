@@ -1,0 +1,1977 @@
+#include "app.hpp"
+#include "render.hpp"
+#include "rough.hpp"
+#include "store.hpp"
+#include "text.hpp"
+
+#include <nanovg.h>
+#include <nlohmann/json.hpp>
+
+#include <cmath>
+#include <format>
+
+namespace fs = std::filesystem;
+using nlohmann::json;
+
+namespace {
+
+constexpr double max_scale = 1e12;   // camera px per anchor unit
+constexpr double draw_root_max = 1e9; // ancestors larger than this are skipped
+constexpr double initial_root_px = 1e6;
+
+bool covers(const Rect& r, int w, int h) {
+    return r.x <= 0 && r.y <= 0 && r.right() >= w && r.bottom() >= h;
+}
+
+// Placement of `n`'s parent, given `n`'s placement.
+Xform parent_xform(const Node& n, Xform t) {
+    double s = t.s / n.w;
+    return {t.ox - n.x * s, t.oy - n.y * s, s};
+}
+
+double dist_to_segment(Vec2 p, Vec2 a, Vec2 b) {
+    Vec2 ab = b - a;
+    double len2 = ab.x * ab.x + ab.y * ab.y;
+    double k = len2 > 0 ? std::clamp(((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / len2,
+                                     0.0, 1.0)
+                        : 0.0;
+    return length(p - (a + ab * k));
+}
+
+// Ramer-Douglas-Peucker: drops points that add no visible detail.
+void simplify(const std::vector<Vec2>& in, double tol, std::vector<Vec2>& out) {
+    if (in.size() < 3) {
+        out = in;
+        return;
+    }
+    std::vector<bool> keep(in.size(), false);
+    keep.front() = keep.back() = true;
+    std::vector<std::pair<size_t, size_t>> stack{{0, in.size() - 1}};
+    while (!stack.empty()) {
+        auto [a, b] = stack.back();
+        stack.pop_back();
+        double best = 0;
+        size_t idx = a;
+        for (size_t i = a + 1; i < b; ++i) {
+            double d = dist_to_segment(in[i], in[a], in[b]);
+            if (d > best) {
+                best = d;
+                idx = i;
+            }
+        }
+        if (best > tol) {
+            keep[idx] = true;
+            stack.push_back({a, idx});
+            stack.push_back({idx, b});
+        }
+    }
+    out.clear();
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (keep[i]) {
+            out.push_back(in[i]);
+        }
+    }
+}
+
+void regen_ids(Node& n) {
+    n.id = new_id();
+    for (auto& c : n.children) {
+        regen_ids(*c);
+    }
+}
+
+size_t prev_cp(const std::string& s, size_t i) {
+    if (i == 0) {
+        return 0;
+    }
+    --i;
+    while (i > 0 && (s[i] & 0xc0) == 0x80) {
+        --i;
+    }
+    return i;
+}
+
+size_t next_cp(const std::string& s, size_t i) {
+    if (i >= s.size()) {
+        return s.size();
+    }
+    ++i;
+    while (i < s.size() && (s[i] & 0xc0) == 0x80) {
+        ++i;
+    }
+    return i;
+}
+
+// Byte index where the line containing `i` starts.
+size_t line_start(const std::string& s, size_t i) {
+    if (i == 0) {
+        return 0;
+    }
+    size_t nl = s.rfind('\n', i - 1);
+    return nl == std::string::npos ? 0 : nl + 1;
+}
+
+Kind kind_for(Tool t) {
+    switch (t) {
+    case Tool::Diamond: return Kind::Diamond;
+    case Tool::Ellipse: return Kind::Ellipse;
+    case Tool::Arrow: return Kind::Arrow;
+    case Tool::Line: return Kind::Line;
+    case Tool::Draw: return Kind::Draw;
+    default: return Kind::Rect;
+    }
+}
+
+bool is_shape_tool(Tool t) {
+    return t == Tool::Rect || t == Tool::Diamond || t == Tool::Ellipse ||
+           t == Tool::Arrow || t == Tool::Line || t == Tool::Draw;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------- lifecycle
+
+App::App(NVGcontext* vg, SDL_Window* window, fs::path map_dir)
+    : vg_(vg), window_(window), dir_(std::move(map_dir)), assets_(vg, dir_) {
+    fs::create_directories(dir_);
+    root_ = store::load(dir_);
+    anchor_ = root_.get();
+    SDL_GetWindowSize(window_, &win_w_, &win_h_);
+
+    store::View view = store::load_view(dir_);
+    Node* a = view.valid ? find_by_id(*root_, view.anchor_id) : nullptr;
+    if (a && view.camera.scale > 0) {
+        anchor_ = a;
+        cam_ = view.camera;
+    } else {
+        cam_.scale = initial_root_px;
+        cam_.x = 0.5 - win_w_ / 2.0 / cam_.scale;
+        cam_.y = 0.5 - win_h_ / 2.0 / cam_.scale;
+    }
+    history_.push_back(node_to_json(*root_, true).dump());
+    history_pos_ = 0;
+}
+
+App::~App() { flush(); }
+
+void App::flush() {
+    try {
+        store::save(*root_, dir_);
+        store::save_view(dir_, {anchor_->id, cam_, true});
+        dirty_ = false;
+        save_status_ = "Saved";
+    } catch (const std::exception& e) {
+        save_status_ = "Save failed";
+        toast(std::string("Save failed: ") + e.what());
+    }
+}
+
+void App::mark_dirty() {
+    dirty_ = true;
+    last_change_ = now_;
+    save_status_ = "Saving…";
+}
+
+void App::toast(const std::string& msg) {
+    toast_ = msg;
+    toast_until_ = now_ + 2.5;
+}
+
+void App::commit() {
+    std::string state = node_to_json(*root_, true).dump();
+    if (history_pos_ >= 0 && history_[history_pos_] == state) {
+        return;
+    }
+    history_.resize(history_pos_ + 1);
+    history_.push_back(std::move(state));
+    // ponytail: whole-map snapshots; switch to diffs if maps get huge.
+    if (history_.size() > 200) {
+        history_.erase(history_.begin());
+    }
+    history_pos_ = int(history_.size()) - 1;
+    mark_dirty();
+}
+
+void App::restore(const std::string& state) {
+    std::string anchor_id = anchor_->id;
+    editing_ = nullptr;
+    SDL_StopTextInput(window_);
+    drag_ = Drag::None;
+    creating_ = nullptr;
+    erasing_.clear();
+    selection_.clear();
+    root_ = node_from_json(json::parse(state));
+    anchor_ = find_by_id(*root_, anchor_id);
+    if (!anchor_) {
+        anchor_ = root_.get();
+        cam_.scale = initial_root_px;
+        cam_.x = 0.5 - win_w_ / 2.0 / cam_.scale;
+        cam_.y = 0.5 - win_h_ / 2.0 / cam_.scale;
+    }
+    mark_dirty();
+}
+
+void App::undo() {
+    finish_text_edit();
+    if (history_pos_ > 0) {
+        restore(history_[--history_pos_]);
+    }
+}
+
+void App::redo() {
+    if (history_pos_ + 1 < int(history_.size())) {
+        restore(history_[++history_pos_]);
+    }
+}
+
+void App::set_tool(Tool t) {
+    finish_text_edit();
+    tool_ = t;
+    if (t != Tool::Select) {
+        selection_.clear();
+    }
+    if (t == Tool::Image) {
+        open_file_dialog();
+        tool_ = Tool::Select;
+    }
+}
+
+// ---------------------------------------------------------------- geometry
+
+std::optional<Xform> App::xform_of(const Node* n) const {
+    // Walk up until we reach the anchor or one of its ancestors...
+    std::vector<const Node*> chain;
+    const Node* p = n;
+    while (p && !is_ancestor(p, anchor_)) {
+        chain.push_back(p);
+        p = p->parent;
+    }
+    if (!p) {
+        return std::nullopt;
+    }
+    // ...find that node's placement by climbing up from the anchor...
+    Xform t = cam_.xform();
+    for (const Node* q = anchor_; q != p; q = q->parent) {
+        t = parent_xform(*q, t);
+        if (t.s > max_scale) {
+            return std::nullopt; // astronomically large: not usable
+        }
+    }
+    // ...then walk back down to `n`.
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        t = child_xform(t, **it);
+    }
+    return t;
+}
+
+std::optional<Rect> App::screen_rect_of(const Node* n) const {
+    auto t = xform_of(n);
+    if (!t) {
+        return std::nullopt;
+    }
+    return screen_rect(*n, *t);
+}
+
+// Keeps the anchor = the deepest node covering the whole window, with the
+// camera in its units. This is what makes zoom depth unlimited.
+void App::reroot() {
+    // A later (higher) sibling that also fills the window is what you see,
+    // so step up and let the downward pass pick it.
+    auto hidden_by_sibling = [&] {
+        if (!anchor_->parent) {
+            return false;
+        }
+        Xform pt = parent_xform(*anchor_, cam_.xform());
+        auto& sib = anchor_->parent->children;
+        for (size_t i = size_t(index_in_parent(*anchor_)) + 1; i < sib.size(); ++i) {
+            if (covers(screen_rect(*sib[i], child_xform(pt, *sib[i])), win_w_, win_h_)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    while (anchor_->parent &&
+           (!covers(screen_rect(*anchor_, cam_.xform()), win_w_, win_h_) ||
+            hidden_by_sibling())) {
+        const Node& a = *anchor_;
+        cam_.x = cam_.x * a.w + a.x;
+        cam_.y = cam_.y * a.w + a.y;
+        cam_.scale /= a.w;
+        anchor_ = a.parent;
+    }
+    bool moved = true;
+    while (moved) {
+        moved = false;
+        Xform t = cam_.xform();
+        // Topmost child first: that's the one you see.
+        for (auto it = anchor_->children.rbegin(); it != anchor_->children.rend(); ++it) {
+            const Node& c = **it;
+            if (covers(screen_rect(c, child_xform(t, c)), win_w_, win_h_)) {
+                cam_.x = (cam_.x - c.x) / c.w;
+                cam_.y = (cam_.y - c.y) / c.w;
+                cam_.scale *= c.w;
+                anchor_ = it->get();
+                moved = true;
+                break;
+            }
+        }
+    }
+}
+
+void App::clamp_zoom() {
+    Vec2 center{win_w_ / 2.0, win_h_ / 2.0};
+    if (anchor_ == root_.get()) {
+        double min_scale = std::max(win_w_, win_h_);
+        if (cam_.scale < min_scale) {
+            cam_.zoom_at(center, min_scale / cam_.scale);
+        }
+    }
+    if (cam_.scale > max_scale) {
+        cam_.zoom_at(mouse_, max_scale / cam_.scale);
+    }
+}
+
+bool App::hit_self(const Node& n, Xform t, Vec2 p) const {
+    Rect r = screen_rect(n, t);
+    double sw = n.style.stroke_width * parent_scale(n, t);
+    double tol = std::max(6.0, sw / 2 + 4);
+    bool filled = (n.style.fill & 0xff) != 0 ||
+                  (!n.text.empty() && n.children.empty());
+    switch (n.kind) {
+    case Kind::Rect:
+        if (filled) {
+            return r.contains(p);
+        }
+        return r.expanded(tol).contains(p) && !r.expanded(-tol).contains(p);
+    case Kind::Ellipse:
+    case Kind::Diamond: {
+        Vec2 c = r.center();
+        double rx = r.w / 2, ry = r.h / 2;
+        double dx = (p.x - c.x) / rx, dy = (p.y - c.y) / ry;
+        double d = n.kind == Kind::Ellipse ? std::sqrt(dx * dx + dy * dy)
+                                           : std::abs(dx) + std::abs(dy);
+        if (filled && d <= 1) {
+            return true;
+        }
+        return std::abs(d - 1) * std::min(rx, ry) <= tol;
+    }
+    case Kind::Line:
+    case Kind::Arrow:
+    case Kind::Draw: {
+        auto pts = screen_points(n, t);
+        if (pts.size() == 1) {
+            return length(p - pts[0]) <= tol;
+        }
+        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+            if (dist_to_segment(p, pts[i], pts[i + 1]) <= tol) {
+                return true;
+            }
+        }
+        return false;
+    }
+    default:
+        return r.contains(p);
+    }
+}
+
+Node* App::pick_in(Node& n, Xform t, Vec2 p) {
+    Rect r = screen_rect(n, t);
+    double sw = n.style.stroke_width * parent_scale(n, t);
+    if (n.kind != Kind::Root &&
+        (!r.expanded(std::max(8.0, sw)).contains(p) || (r.w < 2 && r.h < 2))) {
+        return nullptr;
+    }
+    // Topmost first: later siblings, and children above their parent.
+    for (auto it = n.children.rbegin(); it != n.children.rend(); ++it) {
+        if (Node* hit = pick_in(**it, child_xform(t, **it), p)) {
+            return hit;
+        }
+    }
+    if (n.kind == Kind::Root || covers(r, win_w_, win_h_)) {
+        return nullptr; // the background you're zoomed into
+    }
+    if (hit_self(n, t, p)) {
+        return n.kind == Kind::PdfPage ? n.parent : &n;
+    }
+    return nullptr;
+}
+
+Node* App::pick(Vec2 p) {
+    Xform t = cam_.xform();
+    Node* n = anchor_;
+    while (n->parent && parent_xform(*n, t).s <= draw_root_max) {
+        t = parent_xform(*n, t);
+        n = n->parent;
+    }
+    return pick_in(*n, t, p);
+}
+
+// Deepest container under `p` (where a new shape at `p` should live).
+Node* App::container_at(Vec2 p, const Node* exclude) {
+    Node* best = anchor_;
+    while (!best->is_container()) {
+        best = best->parent;
+    }
+    Xform t = *xform_of(best);
+    while (true) {
+        Node* next = nullptr;
+        for (auto it = best->children.rbegin(); it != best->children.rend(); ++it) {
+            Node& c = **it;
+            if (!c.is_container() || c.kind == Kind::PdfPage ||
+                (exclude && is_ancestor(exclude, &c))) {
+                continue;
+            }
+            Xform ct = child_xform(t, c);
+            Rect r = screen_rect(c, ct);
+            if (r.w < 40 || !r.contains(p)) {
+                continue;
+            }
+            bool inside = true;
+            if (c.kind == Kind::Ellipse || c.kind == Kind::Diamond) {
+                Vec2 cc = r.center();
+                double dx = (p.x - cc.x) / (r.w / 2), dy = (p.y - cc.y) / (r.h / 2);
+                inside = c.kind == Kind::Ellipse ? dx * dx + dy * dy <= 1
+                                                 : std::abs(dx) + std::abs(dy) <= 1;
+            }
+            if (inside) {
+                next = &c;
+                t = ct;
+                break;
+            }
+        }
+        if (!next) {
+            return best;
+        }
+        best = next;
+    }
+}
+
+void App::reparent(Node& n, Node& np) {
+    auto old_t = xform_of(n.parent);
+    auto new_t = xform_of(&np);
+    auto r = screen_rect_of(&n);
+    if (!old_t || !new_t || !r) {
+        return;
+    }
+    n.x = (r->x - new_t->ox) / new_t->s;
+    n.y = (r->y - new_t->oy) / new_t->s;
+    n.w = r->w / new_t->s;
+    n.h = r->h / new_t->s;
+    double k = old_t->s / new_t->s;
+    n.style.stroke_width *= k;
+    n.style.font_size *= k;
+    add_child(np, detach(n));
+}
+
+void App::set_linear_points(Node& n, const std::vector<Vec2>& pts) {
+    double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+    for (Vec2 p : pts) {
+        x0 = std::min(x0, p.x);
+        y0 = std::min(y0, p.y);
+        x1 = std::max(x1, p.x);
+        y1 = std::max(y1, p.y);
+    }
+    double pad = std::max(n.style.stroke_width / 2, 1e-300);
+    n.x = x0 - pad;
+    n.y = y0 - pad;
+    n.w = x1 - x0 + 2 * pad;
+    n.h = y1 - y0 + 2 * pad;
+    n.points.clear();
+    for (Vec2 p : pts) {
+        n.points.push_back({(p.x - n.x) / n.w, (p.y - n.y) / n.h});
+    }
+}
+
+std::vector<Vec2> App::linear_local_points(const Node& n) const {
+    std::vector<Vec2> out;
+    for (Vec2 p : n.points) {
+        out.push_back({n.x + p.x * n.w, n.y + p.y * n.h});
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------- editing
+
+void App::place_new_node(Node& parent, Node& n, Rect r) {
+    auto tp = xform_of(&parent);
+    if (!tp) {
+        return;
+    }
+    n.x = (r.x - tp->ox) / tp->s;
+    n.y = (r.y - tp->oy) / tp->s;
+    n.w = r.w / tp->s;
+    n.h = r.h / tp->s;
+}
+
+void App::start_create(Vec2 p, Mods) {
+    Node* parent = container_at(p, nullptr);
+    auto tp = xform_of(parent);
+    if (!tp) {
+        return;
+    }
+    auto node = make_node(kind_for(tool_));
+    node->style = style_;
+    node->style.stroke_width = stroke_px_ / tp->s;
+    node->style.font_size = font_px_ / tp->s;
+    if (node->is_linear()) {
+        node->style.fill = 0;
+    }
+    create_start_local_ = tp->to_local(p);
+    node->x = create_start_local_.x;
+    node->y = create_start_local_.y;
+    node->w = node->h = 1 / tp->s;
+    creating_ = &add_child(*parent, std::move(node));
+    if (creating_->is_linear()) {
+        draw_local_ = {create_start_local_};
+        set_linear_points(*creating_, {create_start_local_, create_start_local_});
+    }
+    drag_ = Drag::Create;
+}
+
+void App::update_create(Vec2 p, Mods m) {
+    auto tp = xform_of(creating_->parent);
+    if (!tp) {
+        return;
+    }
+    Vec2 a = create_start_local_, q = tp->to_local(p);
+    switch (creating_->kind) {
+    case Kind::Line:
+    case Kind::Arrow:
+        if (m.shift) { // snap to 15 degrees
+            Vec2 d = q - a;
+            double ang = std::round(std::atan2(d.y, d.x) / (M_PI / 12)) * (M_PI / 12);
+            double len = length(d);
+            q = {a.x + std::cos(ang) * len, a.y + std::sin(ang) * len};
+        }
+        set_linear_points(*creating_, {a, q});
+        break;
+    case Kind::Draw:
+        if (length(q - draw_local_.back()) * tp->s > 1.5) {
+            draw_local_.push_back(q);
+            set_linear_points(*creating_, draw_local_);
+        }
+        break;
+    default: {
+        if (m.shift) {
+            double d = std::max(std::abs(q.x - a.x), std::abs(q.y - a.y));
+            q = {a.x + std::copysign(d, q.x - a.x), a.y + std::copysign(d, q.y - a.y)};
+        }
+        Rect r = Rect::from_points(a, q);
+        creating_->x = r.x;
+        creating_->y = r.y;
+        creating_->w = std::max(r.w, 1 / tp->s);
+        creating_->h = std::max(r.h, 1 / tp->s);
+        break;
+    }
+    }
+}
+
+void App::finish_create() {
+    Node* n = creating_;
+    creating_ = nullptr;
+    auto tp = xform_of(n->parent);
+    auto r = screen_rect_of(n);
+    bool tiny = !tp || !r || (r->w < 4 && r->h < 4);
+    if (n->kind == Kind::Draw && tp) {
+        tiny = false; // a click with the pen is a dot
+        std::vector<Vec2> simple;
+        simplify(draw_local_, 0.5 / tp->s, simple);
+        set_linear_points(*n, simple);
+    }
+    if (tiny) {
+        detach(*n);
+        return;
+    }
+    if (tool_ != Tool::Draw) {
+        tool_ = Tool::Select;
+        selection_ = {n};
+    }
+    commit();
+}
+
+void App::start_text_edit(Node& n, bool) {
+    finish_text_edit();
+    if (n.style.font_size <= 0) {
+        auto tp = xform_of(n.parent);
+        n.style.font_size = font_px_ / (tp ? tp->s : 1);
+    }
+    editing_ = &n;
+    caret_ = n.text.size();
+    caret_blink_start_ = now_;
+    selection_ = {&n};
+    SDL_StartTextInput(window_);
+}
+
+void App::finish_text_edit() {
+    if (!editing_) {
+        return;
+    }
+    Node* n = editing_;
+    editing_ = nullptr;
+    SDL_StopTextInput(window_);
+    bool blank = n->text.find_first_not_of(" \n\t") == std::string::npos;
+    if (n->kind == Kind::Text && blank) {
+        std::erase(selection_, n);
+        detach(*n);
+    }
+    commit();
+}
+
+std::vector<Node*> App::top_level_selection() const {
+    std::vector<Node*> out;
+    for (Node* n : selection_) {
+        bool nested = false;
+        for (Node* other : selection_) {
+            if (other != n && is_ancestor(other, n)) {
+                nested = true;
+            }
+        }
+        if (!nested) {
+            out.push_back(n);
+        }
+    }
+    return out;
+}
+
+void App::delete_selection() {
+    for (Node* n : top_level_selection()) {
+        if (is_ancestor(n, anchor_)) {
+            continue; // never delete the place you're standing in
+        }
+        detach(*n);
+    }
+    selection_.clear();
+    commit();
+}
+
+void App::copy_selection() {
+    json items = json::array();
+    std::string plain;
+    for (Node* n : top_level_selection()) {
+        auto r = screen_rect_of(n);
+        auto tp = xform_of(n->parent);
+        if (!r || !tp) {
+            continue;
+        }
+        items.push_back({{"node", node_to_json(*n, true)},
+                         {"rect", {r->x, r->y, r->w, r->h}},
+                         {"s", tp->s}});
+        if (!n->text.empty()) {
+            plain += (plain.empty() ? "" : "\n") + n->text;
+        }
+    }
+    if (items.empty()) {
+        return;
+    }
+    clipboard_ = items.dump();
+    clipboard_text_ = plain.empty() ? "[tanuki shapes]" : plain;
+    SDL_SetClipboardText(clipboard_text_.c_str());
+}
+
+void App::paste(Vec2 at) {
+    if (SDL_HasClipboardData("image/png")) {
+        size_t size = 0;
+        void* data = SDL_GetClipboardData("image/png", &size);
+        if (data && size) {
+            std::string rel = assets_.import_bytes(data, size, ".png");
+            SDL_free(data);
+            insert_file((dir_ / rel).string(), at);
+            fs::remove(dir_ / rel); // insert_file copied it again
+        }
+        return;
+    }
+    char* raw = SDL_GetClipboardText();
+    std::string txt = raw ? raw : "";
+    SDL_free(raw);
+
+    Node* parent = container_at(at, nullptr);
+    auto tp = xform_of(parent);
+    if (!tp) {
+        return;
+    }
+    if (!clipboard_.empty() && txt == clipboard_text_) {
+        json items = json::parse(clipboard_);
+        Rect bbox{1e300, 1e300, 0, 0};
+        double x1 = -1e300, y1 = -1e300;
+        for (const auto& it : items) {
+            bbox.x = std::min(bbox.x, it["rect"][0].get<double>());
+            bbox.y = std::min(bbox.y, it["rect"][1].get<double>());
+            x1 = std::max(x1, it["rect"][0].get<double>() + it["rect"][2].get<double>());
+            y1 = std::max(y1, it["rect"][1].get<double>() + it["rect"][3].get<double>());
+        }
+        bbox.w = x1 - bbox.x;
+        bbox.h = y1 - bbox.y;
+        Vec2 shift = at - bbox.center();
+        selection_.clear();
+        for (const auto& it : items) {
+            auto n = node_from_json(it["node"]);
+            regen_ids(*n);
+            Rect r{it["rect"][0].get<double>() + shift.x,
+                   it["rect"][1].get<double>() + shift.y,
+                   it["rect"][2].get<double>(), it["rect"][3].get<double>()};
+            double k = it["s"].get<double>() / tp->s;
+            n->style.stroke_width *= k;
+            n->style.font_size *= k;
+            Node& added = add_child(*parent, std::move(n));
+            place_new_node(*parent, added, r);
+            selection_.push_back(&added);
+        }
+        commit();
+        return;
+    }
+    if (!txt.empty()) {
+        auto n = make_node(Kind::Text);
+        n->style = style_;
+        n->style.font_size = font_px_ / tp->s;
+        n->text = txt;
+        fit_text_bounds(vg_, *n);
+        Vec2 q = tp->to_local(at);
+        n->x = q.x - n->w / 2;
+        n->y = q.y - n->h / 2;
+        selection_ = {&add_child(*parent, std::move(n))};
+        commit();
+    }
+}
+
+void App::duplicate_selection() {
+    std::vector<Node*> copies;
+    for (Node* n : top_level_selection()) {
+        auto tp = xform_of(n->parent);
+        if (!tp || is_ancestor(n, anchor_)) {
+            continue;
+        }
+        auto c = node_from_json(node_to_json(*n, true));
+        regen_ids(*c);
+        c->x += 12 / tp->s;
+        c->y += 12 / tp->s;
+        copies.push_back(&add_child(*n->parent, std::move(c)));
+    }
+    if (!copies.empty()) {
+        selection_ = copies;
+        commit();
+    }
+}
+
+void App::select_all() {
+    selection_.clear();
+    for (auto& c : anchor_->children) {
+        selection_.push_back(c.get());
+    }
+}
+
+void App::move_layer(bool to_front) {
+    for (Node* n : top_level_selection()) {
+        Node* p = n->parent;
+        auto owned = detach(*n);
+        owned->parent = p;
+        if (to_front) {
+            p->children.push_back(std::move(owned));
+        } else {
+            p->children.insert(p->children.begin(), std::move(owned));
+        }
+    }
+    commit();
+}
+
+void App::nudge(double dx, double dy) {
+    for (Node* n : top_level_selection()) {
+        if (auto tp = xform_of(n->parent)) {
+            n->x += dx / tp->s;
+            n->y += dy / tp->s;
+        }
+    }
+    commit();
+}
+
+void App::apply_to_selection(const std::function<void(Node&)>& f) {
+    for (Node* n : selection_) {
+        f(*n);
+    }
+    if (!selection_.empty()) {
+        commit();
+    }
+}
+
+// ---------------------------------------------------------------- files
+
+void App::open_file_dialog() {
+    static const SDL_DialogFileFilter filters[] = {
+        {"Images and PDFs", "png;jpg;jpeg;gif;bmp;tga;pdf"}};
+    SDL_ShowOpenFileDialog(
+        [](void* self, const char* const* files, int) {
+            if (!files) {
+                return;
+            }
+            App* app = static_cast<App*>(self);
+            std::lock_guard lock(app->pending_mutex_);
+            for (int i = 0; files[i]; ++i) {
+                app->pending_files_.push_back(files[i]);
+            }
+        },
+        this, window_, filters, 1, nullptr, true);
+}
+
+void App::drop_file(const std::string& path, Vec2 p) { insert_file(path, p); }
+
+void App::insert_file(const std::string& path, Vec2 center) {
+    std::string ext = fs::path(path).extension().string();
+    for (char& c : ext) {
+        c = char(std::tolower((unsigned char)c));
+    }
+    Node* parent = container_at(center, nullptr);
+    auto tp = xform_of(parent);
+    if (!tp) {
+        return;
+    }
+    std::string rel;
+    try {
+        rel = assets_.import(path);
+    } catch (const std::exception& e) {
+        toast(std::string("Couldn't import: ") + e.what());
+        return;
+    }
+
+    if (ext == ".pdf") {
+        int pages = assets_.pdf_page_count(rel);
+        if (pages == 0) {
+            toast("Couldn't open PDF");
+            return;
+        }
+        auto pdf = make_node(Kind::Pdf);
+        pdf->text = fs::path(path).stem().string();
+        pdf->style.stroke_width = 0;
+        // Pages stacked vertically in the container's local units.
+        double y = 0.08;
+        for (int i = 0; i < pages; ++i) {
+            auto [pw, ph] = assets_.pdf_page_size(rel, i);
+            auto page = make_node(Kind::PdfPage);
+            page->asset = rel;
+            page->page = i;
+            page->style.stroke_width = 0;
+            page->x = 0.05;
+            page->y = y;
+            page->w = 0.9;
+            page->h = pw > 0 ? 0.9 * ph / pw : 0.9 * 1.414;
+            y += page->h + 0.03;
+            add_child(*pdf, std::move(page));
+        }
+        double aspect = y + 0.02;
+        double w_px = std::min(win_w_ * 0.4, 600.0);
+        double h_px = w_px * aspect;
+        Rect r{center.x - w_px / 2, center.y - std::min(h_px, win_h_ * 0.4), w_px, h_px};
+        Node& added = add_child(*parent, std::move(pdf));
+        place_new_node(*parent, added, r);
+        added.style.font_size = added.w * 0.035;
+        selection_ = {&added};
+        commit();
+        return;
+    }
+
+    const Texture* tex = assets_.image(rel);
+    if (!tex) {
+        fs::remove(dir_ / rel);
+        toast("Unsupported file: " + fs::path(path).filename().string());
+        return;
+    }
+    double k = std::min({1.0, win_w_ * 0.5 / tex->w, win_h_ * 0.5 / tex->h});
+    double w = tex->w * k, h = tex->h * k;
+    auto img = make_node(Kind::Image);
+    img->asset = rel;
+    img->style.stroke_width = 0;
+    Node& added = add_child(*parent, std::move(img));
+    place_new_node(*parent, added, {center.x - w / 2, center.y - h / 2, w, h});
+    selection_ = {&added};
+    commit();
+}
+
+// ---------------------------------------------------------------- navigation
+
+void App::fly_to(const Node* n) {
+    fly_id_ = n->id;
+    fly_content_ = n->kind == Kind::Root;
+    flying_ = true;
+}
+
+void App::fly_to_content() {
+    fly_id_ = anchor_->id;
+    fly_content_ = true;
+    flying_ = true;
+}
+
+void App::fly_out() {
+    if (anchor_ == root_.get()) {
+        fly_to_content();
+    } else {
+        fly_to(anchor_);
+    }
+}
+
+void App::step_fly(double dt) {
+    if (!flying_) {
+        return;
+    }
+    Node* target = find_by_id(*root_, fly_id_);
+    if (!target) {
+        flying_ = false;
+        return;
+    }
+    std::optional<Rect> T;
+    if (fly_content_) {
+        double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+        for (auto& c : target->children) {
+            if (auto r = screen_rect_of(c.get())) {
+                x0 = std::min(x0, r->x);
+                y0 = std::min(y0, r->y);
+                x1 = std::max(x1, r->right());
+                y1 = std::max(y1, r->bottom());
+            }
+        }
+        if (x1 > x0) {
+            T = Rect{x0, y0, x1 - x0, y1 - y0};
+        } else if (target->children.empty()) {
+            flying_ = false;
+            return;
+        }
+    } else {
+        T = screen_rect_of(target);
+    }
+    Vec2 center{win_w_ / 2.0, win_h_ / 2.0};
+    if (!T) { // target is far above us: zoom out until it's reachable
+        cam_.zoom_at(center, 0.8);
+        return;
+    }
+    double margin = 0.85;
+    double f = std::min(win_w_ * margin / std::max(T->w, 1e-9),
+                        win_h_ * margin / std::max(T->h, 1e-9));
+    Vec2 dc = center - T->center();
+    if (std::abs(std::log(f)) < 0.003 && length(dc) < 0.5) {
+        flying_ = false;
+        return;
+    }
+    double k = 1 - std::exp(-dt * 9);
+    // Zoom in log space (so many levels feel as smooth as one), centered on
+    // the target, while sliding it to the middle of the window.
+    cam_.zoom_at(T->center(), std::pow(f, k));
+    cam_.pan(dc.x * k, dc.y * k);
+}
+
+// ---------------------------------------------------------------- input
+
+void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
+    mouse_ = p;
+    flying_ = false;
+    if (button == SDL_BUTTON_LEFT && ui_click(p)) {
+        return;
+    }
+    if (button == SDL_BUTTON_MIDDLE || (button == SDL_BUTTON_LEFT &&
+                                        (tool_ == Tool::Hand || space_down_))) {
+        drag_ = Drag::Pan;
+        drag_last_ = p;
+        return;
+    }
+    if (button != SDL_BUTTON_LEFT) {
+        return;
+    }
+    drag_start_ = drag_last_ = p;
+    moved_ = false;
+
+    if (editing_) {
+        auto r = screen_rect_of(editing_);
+        if (r && r->expanded(4).contains(p)) {
+            return; // click inside the text being edited
+        }
+        finish_text_edit();
+        if (tool_ == Tool::Select) {
+            return;
+        }
+    }
+
+    switch (tool_) {
+    case Tool::Text: {
+        Node* parent = container_at(p, nullptr);
+        auto tp = xform_of(parent);
+        if (!tp) {
+            return;
+        }
+        auto n = make_node(Kind::Text);
+        n->style = style_;
+        n->style.font_size = font_px_ / tp->s;
+        Vec2 q = tp->to_local(p);
+        n->x = q.x;
+        n->y = q.y - n->style.font_size * text::line_height / 2;
+        fit_text_bounds(vg_, *n);
+        Node& added = add_child(*parent, std::move(n));
+        tool_ = Tool::Select;
+        start_text_edit(added);
+        return;
+    }
+    case Tool::Eraser:
+        drag_ = Drag::Erase;
+        erasing_.clear();
+        if (Node* n = pick(p)) {
+            erasing_.insert(n);
+        }
+        return;
+    case Tool::Select:
+        break;
+    default:
+        if (is_shape_tool(tool_)) {
+            start_create(p, m);
+        }
+        return;
+    }
+
+    // Double-click: edit a shape's label or a text, or start a new text.
+    Node* hit = pick(p);
+    if (clicks >= 2) {
+        if (hit && (hit->kind == Kind::Text || hit->kind == Kind::Rect ||
+                    hit->kind == Kind::Ellipse || hit->kind == Kind::Diamond)) {
+            start_text_edit(*hit);
+        } else if (!hit) {
+            tool_ = Tool::Text;
+            mouse_down(p, button, 1, m);
+        }
+        return;
+    }
+
+    // Select tool: handles first, then shapes, then empty space.
+    if (selection_.size() == 1) {
+        Node* n = selection_[0];
+        auto t = xform_of(n);
+        if (t && (n->kind == Kind::Line || n->kind == Kind::Arrow)) {
+            auto pts = screen_points(*n, *t);
+            for (int i : {0, int(pts.size()) - 1}) {
+                if (length(p - pts[i]) <= 8) {
+                    drag_ = Drag::Endpoint;
+                    resize_handle_ = i;
+                    return;
+                }
+            }
+        } else if (t && !is_ancestor(n, anchor_)) {
+            Rect r = screen_rect(*n, *t).expanded(4);
+            Vec2 hp[8] = {{r.x, r.y}, {r.center().x, r.y}, {r.right(), r.y},
+                          {r.right(), r.center().y}, {r.right(), r.bottom()},
+                          {r.center().x, r.bottom()}, {r.x, r.bottom()},
+                          {r.x, r.center().y}};
+            for (int i = 0; i < 8; ++i) {
+                if (std::abs(p.x - hp[i].x) <= 6 && std::abs(p.y - hp[i].y) <= 6) {
+                    drag_ = Drag::Resize;
+                    resize_handle_ = i;
+                    resize_orig_screen_ = screen_rect(*n, *t);
+                    resize_orig_font_ = n->style.font_size;
+                    return;
+                }
+            }
+        }
+    }
+
+    if (hit) {
+        bool selected = std::ranges::find(selection_, hit) != selection_.end();
+        if (m.shift) {
+            if (selected) {
+                std::erase(selection_, hit);
+            } else {
+                selection_.push_back(hit);
+            }
+        } else if (!selected) {
+            selection_ = {hit};
+        }
+        drag_ = Drag::Move;
+        return;
+    }
+    if (!m.shift) {
+        selection_.clear();
+    }
+    drag_ = Drag::Band;
+}
+
+void App::mouse_move(Vec2 p, Mods m) {
+    Vec2 d = p - drag_last_;
+    mouse_ = p;
+    switch (drag_) {
+    case Drag::Pan:
+        cam_.pan(d.x, d.y);
+        break;
+    case Drag::Create:
+        if (creating_) {
+            update_create(p, m);
+        }
+        break;
+    case Drag::Move:
+        if (length(p - drag_start_) < 3 && !moved_) {
+            return; // don't drag on a sloppy click
+        }
+        for (Node* n : top_level_selection()) {
+            if (is_ancestor(n, anchor_)) {
+                continue;
+            }
+            if (auto tp = xform_of(n->parent)) {
+                n->x += d.x / tp->s;
+                n->y += d.y / tp->s;
+                moved_ = true;
+            }
+        }
+        break;
+    case Drag::Resize: {
+        Node* n = selection_.empty() ? nullptr : selection_[0];
+        auto tp = n ? xform_of(n->parent) : std::nullopt;
+        if (!tp) {
+            break;
+        }
+        const Rect& o = resize_orig_screen_;
+        int h = resize_handle_;
+        bool L = h == 0 || h == 6 || h == 7, R = h == 2 || h == 3 || h == 4;
+        bool T = h == 0 || h == 1 || h == 2, B = h == 4 || h == 5 || h == 6;
+        Vec2 dd = p - drag_start_;
+        double l = o.x + (L ? dd.x : 0), r = o.right() + (R ? dd.x : 0);
+        double t = o.y + (T ? dd.y : 0), b = o.bottom() + (B ? dd.y : 0);
+        bool keep = m.shift || n->kind == Kind::Text || n->kind == Kind::Image ||
+                    n->kind == Kind::Pdf;
+        if (keep) {
+            double sx = (r - l) / o.w, sy = (b - t) / o.h;
+            double k = (L || R) && (T || B) ? std::max(sx, sy) : (L || R) ? sx : sy;
+            k = std::max(k, 4 / std::min(o.w, o.h));
+            double nw = o.w * k, nh = o.h * k;
+            l = L ? o.right() - nw : R ? o.x : o.center().x - nw / 2;
+            t = T ? o.bottom() - nh : B ? o.y : o.center().y - nh / 2;
+            r = l + nw;
+            b = t + nh;
+        }
+        Rect nr = Rect::from_points({l, t}, {r, b});
+        nr.w = std::max(nr.w, 2.0);
+        nr.h = std::max(nr.h, 2.0);
+        n->x = (nr.x - tp->ox) / tp->s;
+        n->y = (nr.y - tp->oy) / tp->s;
+        n->w = nr.w / tp->s;
+        n->h = nr.h / tp->s;
+        if (n->kind == Kind::Text) {
+            n->style.font_size = resize_orig_font_ * nr.h / o.h;
+        }
+        moved_ = true;
+        break;
+    }
+    case Drag::Endpoint: {
+        Node* n = selection_.empty() ? nullptr : selection_[0];
+        auto tp = n ? xform_of(n->parent) : std::nullopt;
+        if (!tp) {
+            break;
+        }
+        auto pts = linear_local_points(*n);
+        pts[size_t(resize_handle_)] = tp->to_local(p);
+        set_linear_points(*n, pts);
+        moved_ = true;
+        break;
+    }
+    case Drag::Band: {
+        Rect band = Rect::from_points(drag_start_, p);
+        if (!m.shift) {
+            selection_.clear();
+        }
+        std::function<void(Node&, Xform)> collect = [&](Node& n, Xform t) {
+            for (auto& c : n.children) {
+                Xform ct = child_xform(t, *c);
+                Rect r = screen_rect(*c, ct);
+                if (band.contains(r)) {
+                    if (std::ranges::find(selection_, c.get()) == selection_.end()) {
+                        selection_.push_back(c.get());
+                    }
+                } else if (c->is_container() && band.intersects(r)) {
+                    collect(*c, ct);
+                }
+            }
+        };
+        collect(*anchor_, cam_.xform());
+        break;
+    }
+    case Drag::Erase:
+        if (Node* n = pick(p)) {
+            erasing_.insert(n);
+        }
+        break;
+    case Drag::None:
+        break;
+    }
+    drag_last_ = p;
+}
+
+void App::mouse_up(Vec2 p, int button, Mods) {
+    mouse_ = p;
+    Drag d = drag_;
+    drag_ = Drag::None;
+    if (button == SDL_BUTTON_MIDDLE || d == Drag::Pan) {
+        return;
+    }
+    switch (d) {
+    case Drag::Create:
+        if (creating_) {
+            finish_create();
+        }
+        break;
+    case Drag::Move:
+        if (moved_) {
+            // Dropped inside another shape? It now lives there.
+            for (Node* n : top_level_selection()) {
+                auto r = screen_rect_of(n);
+                if (!r || is_ancestor(n, anchor_)) {
+                    continue;
+                }
+                Node* np = container_at(r->center(), n);
+                if (np && np != n->parent && !is_ancestor(n, np)) {
+                    reparent(*n, *np);
+                }
+            }
+            commit();
+        }
+        break;
+    case Drag::Resize:
+    case Drag::Endpoint:
+        if (moved_) {
+            commit();
+        }
+        break;
+    case Drag::Erase: {
+        bool any = false;
+        for (Node* n : erasing_) {
+            bool nested = false;
+            for (Node* o : erasing_) {
+                if (o != n && is_ancestor(o, n)) {
+                    nested = true;
+                }
+            }
+            if (!nested && n->parent && !is_ancestor(n, anchor_)) {
+                std::erase(selection_, n);
+                detach(*n);
+                any = true;
+            }
+        }
+        erasing_.clear();
+        if (any) {
+            commit();
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void App::wheel(Vec2 p, double dx, double dy, Mods m) {
+    mouse_ = p;
+    flying_ = false;
+    if (m.shift && !m.ctrl) {
+        cam_.pan(-dy * 40, 0);
+        return;
+    }
+    if (dx != 0) {
+        cam_.pan(-dx * 40, 0);
+    }
+    if (dy != 0) {
+        cam_.zoom_at(p, std::pow(1.15, dy));
+    }
+}
+
+void App::pinch(double factor) {
+    flying_ = false;
+    cam_.zoom_at(mouse_, factor);
+}
+
+void App::key_up(SDL_Keycode key) {
+    if (key == SDLK_SPACE) {
+        space_down_ = false;
+    }
+}
+
+void App::key_down(SDL_Keycode key, Mods m) {
+    if (editing_) {
+        std::string& s = editing_->text;
+        caret_blink_start_ = now_;
+        auto refit = [&] {
+            if (editing_->kind == Kind::Text) {
+                fit_text_bounds(vg_, *editing_);
+            }
+        };
+        switch (key) {
+        case SDLK_ESCAPE:
+            finish_text_edit();
+            return;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:
+            if (m.ctrl) {
+                finish_text_edit();
+            } else {
+                s.insert(caret_, "\n");
+                ++caret_;
+                refit();
+            }
+            return;
+        case SDLK_BACKSPACE: {
+            size_t p = prev_cp(s, caret_);
+            s.erase(p, caret_ - p);
+            caret_ = p;
+            refit();
+            return;
+        }
+        case SDLK_DELETE:
+            s.erase(caret_, next_cp(s, caret_) - caret_);
+            refit();
+            return;
+        case SDLK_LEFT:
+            caret_ = prev_cp(s, caret_);
+            return;
+        case SDLK_RIGHT:
+            caret_ = next_cp(s, caret_);
+            return;
+        case SDLK_HOME:
+            caret_ = line_start(s, caret_);
+            return;
+        case SDLK_END: {
+            size_t nl = s.find('\n', caret_);
+            caret_ = nl == std::string::npos ? s.size() : nl;
+            return;
+        }
+        case SDLK_UP:
+        case SDLK_DOWN: {
+            size_t ls = line_start(s, caret_);
+            size_t col = caret_ - ls;
+            if (key == SDLK_UP) {
+                if (ls == 0) {
+                    caret_ = 0;
+                    return;
+                }
+                size_t prev_end = ls - 1;
+                caret_ = std::min(line_start(s, prev_end) + col, prev_end);
+            } else {
+                size_t next_start = s.find('\n', caret_);
+                if (next_start == std::string::npos) {
+                    caret_ = s.size();
+                    return;
+                }
+                ++next_start;
+                size_t next_end = s.find('\n', next_start);
+                next_end = next_end == std::string::npos ? s.size() : next_end;
+                caret_ = std::min(next_start + col, next_end);
+            }
+            while (caret_ > 0 && caret_ < s.size() && (s[caret_] & 0xc0) == 0x80) {
+                --caret_;
+            }
+            return;
+        }
+        case SDLK_V:
+            if (m.ctrl) {
+                char* raw = SDL_GetClipboardText();
+                std::string txt = raw ? raw : "";
+                SDL_free(raw);
+                s.insert(caret_, txt);
+                caret_ += txt.size();
+                refit();
+            }
+            return;
+        default:
+            return;
+        }
+    }
+
+    if (m.ctrl) {
+        switch (key) {
+        case SDLK_Z:
+            m.shift ? redo() : undo();
+            return;
+        case SDLK_Y:
+            redo();
+            return;
+        case SDLK_A:
+            select_all();
+            return;
+        case SDLK_D:
+            duplicate_selection();
+            return;
+        case SDLK_C:
+            copy_selection();
+            return;
+        case SDLK_X:
+            copy_selection();
+            delete_selection();
+            return;
+        case SDLK_V:
+            paste(mouse_);
+            return;
+        case SDLK_S: {
+            flush();
+            toast(store::git_commit(dir_));
+            return;
+        }
+        case SDLK_RIGHTBRACKET:
+            move_layer(true);
+            return;
+        case SDLK_LEFTBRACKET:
+            move_layer(false);
+            return;
+        default:
+            return;
+        }
+    }
+
+    switch (key) {
+    case SDLK_SPACE:
+        space_down_ = true;
+        return;
+    case SDLK_ESCAPE:
+        if (drag_ == Drag::Create && creating_) {
+            detach(*creating_);
+            creating_ = nullptr;
+            drag_ = Drag::None;
+        } else if (!selection_.empty()) {
+            selection_.clear();
+        } else if (tool_ != Tool::Select) {
+            tool_ = Tool::Select;
+        } else {
+            fly_out();
+        }
+        return;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        if (selection_.size() == 1) {
+            Node* n = selection_[0];
+            if (n->is_container()) {
+                fly_to(n); // dive in
+            } else if (n->kind == Kind::Text) {
+                start_text_edit(*n);
+            }
+        }
+        return;
+    case SDLK_DELETE:
+    case SDLK_BACKSPACE:
+        delete_selection();
+        return;
+    case SDLK_LEFT: nudge(m.shift ? -10 : -1, 0); return;
+    case SDLK_RIGHT: nudge(m.shift ? 10 : 1, 0); return;
+    case SDLK_UP: nudge(0, m.shift ? -10 : -1); return;
+    case SDLK_DOWN: nudge(0, m.shift ? 10 : 1); return;
+    case SDLK_HOME:
+        fly_to_content();
+        return;
+    case SDLK_H: set_tool(Tool::Hand); return;
+    case SDLK_V: set_tool(Tool::Select); return;
+    case SDLK_R: set_tool(Tool::Rect); return;
+    case SDLK_D: set_tool(Tool::Diamond); return;
+    case SDLK_O: set_tool(Tool::Ellipse); return;
+    case SDLK_A: set_tool(Tool::Arrow); return;
+    case SDLK_L: set_tool(Tool::Line); return;
+    case SDLK_P: set_tool(Tool::Draw); return;
+    case SDLK_T: set_tool(Tool::Text); return;
+    case SDLK_E: set_tool(Tool::Eraser); return;
+    case SDLK_1:
+        if (m.shift) {
+            fly_to_content();
+        } else {
+            set_tool(Tool::Select);
+        }
+        return;
+    case SDLK_2: set_tool(Tool::Rect); return;
+    case SDLK_3: set_tool(Tool::Diamond); return;
+    case SDLK_4: set_tool(Tool::Ellipse); return;
+    case SDLK_5: set_tool(Tool::Arrow); return;
+    case SDLK_6: set_tool(Tool::Line); return;
+    case SDLK_7: set_tool(Tool::Draw); return;
+    case SDLK_8: set_tool(Tool::Text); return;
+    case SDLK_9: set_tool(Tool::Image); return;
+    case SDLK_0: set_tool(Tool::Eraser); return;
+    default:
+        return;
+    }
+}
+
+void App::text_input(const char* utf8) {
+    if (!editing_) {
+        return;
+    }
+    std::string add = utf8;
+    editing_->text.insert(caret_, add);
+    caret_ += add.size();
+    caret_blink_start_ = now_;
+    if (editing_->kind == Kind::Text) {
+        fit_text_bounds(vg_, *editing_);
+    }
+}
+
+// ---------------------------------------------------------------- frame
+
+void App::update(double now, int win_w, int win_h) {
+    double dt = last_frame_ > 0 ? std::min(now - last_frame_, 0.1) : 1 / 60.0;
+    last_frame_ = now_ = now;
+    win_w_ = win_w;
+    win_h_ = win_h;
+
+    std::vector<std::string> files;
+    {
+        std::lock_guard lock(pending_mutex_);
+        files.swap(pending_files_);
+    }
+    for (size_t i = 0; i < files.size(); ++i) {
+        insert_file(files[i], {win_w_ / 2.0 + 24.0 * i, win_h_ / 2.0 + 24.0 * i});
+    }
+
+    step_fly(dt);
+    clamp_zoom();
+    reroot();
+
+    // Selected nodes far above the visible levels can't be edited anymore.
+    std::erase_if(selection_, [&](Node* n) { return !xform_of(n); });
+
+    if (dirty_ && now_ - last_change_ > 0.8 && drag_ == Drag::None) {
+        flush();
+    }
+}
+
+void App::render(float pixel_ratio) {
+    pixel_ratio_ = pixel_ratio;
+    nvgBeginFrame(vg_, float(win_w_), float(win_h_), pixel_ratio);
+
+    RenderCtx ctx{vg_, assets_, {0, 0, double(win_w_), double(win_h_)}, pixel_ratio, {}};
+    for (Node* n : erasing_) {
+        ctx.faded.insert(n);
+    }
+    // Draw from the highest ancestor that's still a sane size, so siblings
+    // overlapping the anchor stay visible.
+    Xform t = cam_.xform();
+    Node* n = anchor_;
+    while (n->parent && parent_xform(*n, t).s <= draw_root_max) {
+        t = parent_xform(*n, t);
+        n = n->parent;
+    }
+    draw_subtree(ctx, *n, t);
+
+    draw_overlay();
+    draw_ui();
+    nvgEndFrame(vg_);
+
+    hits_ = std::move(next_hits_);
+    next_hits_.clear();
+    assets_.end_frame();
+}
+
+// ---------------------------------------------------------------- overlay
+
+void App::draw_overlay() {
+    NVGcontext* vg = vg_;
+    NVGcolor accent = ui::rgb(ui::primary);
+
+    // Hover hint.
+    bool over_ui = std::ranges::any_of(hits_, [&](const Hit& h) { return h.r.contains(mouse_); });
+    if (tool_ == Tool::Select && drag_ == Drag::None && !editing_ && !over_ui) {
+        Node* h = pick(mouse_);
+        if (h && std::ranges::find(selection_, h) == selection_.end()) {
+            if (auto r = screen_rect_of(h); r && r->w < win_w_ && r->h < win_h_) {
+                nvgBeginPath(vg);
+                nvgRect(vg, float(r->x - 4), float(r->y - 4), float(r->w + 8),
+                        float(r->h + 8));
+                nvgStrokeColor(vg, ui::rgb(ui::primary, 90));
+                nvgStrokeWidth(vg, 1);
+                nvgStroke(vg);
+            }
+        }
+    }
+
+    for (Node* n : selection_) {
+        auto t = xform_of(n);
+        if (!t) {
+            continue;
+        }
+        Rect r = screen_rect(*n, *t).expanded(4);
+        bool linear2 = n->kind == Kind::Line || n->kind == Kind::Arrow;
+        if (!(selection_.size() == 1 && linear2)) {
+            nvgBeginPath(vg);
+            nvgRect(vg, float(r.x), float(r.y), float(r.w), float(r.h));
+            nvgStrokeColor(vg, accent);
+            nvgStrokeWidth(vg, 1);
+            nvgStroke(vg);
+        }
+        if (selection_.size() != 1 || editing_ || is_ancestor(n, anchor_)) {
+            continue;
+        }
+        if (linear2) {
+            for (Vec2 p : screen_points(*n, *t)) {
+                nvgBeginPath(vg);
+                nvgCircle(vg, float(p.x), float(p.y), 5);
+                nvgFillColor(vg, nvgRGB(255, 255, 255));
+                nvgFill(vg);
+                nvgStrokeColor(vg, accent);
+                nvgStroke(vg);
+            }
+            continue;
+        }
+        Vec2 hp[8] = {{r.x, r.y}, {r.center().x, r.y}, {r.right(), r.y},
+                      {r.right(), r.center().y}, {r.right(), r.bottom()},
+                      {r.center().x, r.bottom()}, {r.x, r.bottom()},
+                      {r.x, r.center().y}};
+        for (Vec2 p : hp) {
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, float(p.x - 4), float(p.y - 4), 8, 8, 2);
+            nvgFillColor(vg, nvgRGB(255, 255, 255));
+            nvgFill(vg);
+            nvgStrokeColor(vg, accent);
+            nvgStrokeWidth(vg, 1);
+            nvgStroke(vg);
+        }
+    }
+
+    if (drag_ == Drag::Band) {
+        Rect b = Rect::from_points(drag_start_, mouse_);
+        nvgBeginPath(vg);
+        nvgRect(vg, float(b.x), float(b.y), float(b.w), float(b.h));
+        nvgFillColor(vg, ui::rgb(ui::primary, 20));
+        nvgFill(vg);
+        nvgStrokeColor(vg, accent);
+        nvgStrokeWidth(vg, 1);
+        nvgStroke(vg);
+    }
+
+    // Text caret.
+    if (editing_ && std::fmod(now_ - caret_blink_start_, 1.0) < 0.6) {
+        if (auto t = xform_of(editing_)) {
+            TextLayout L = layout_text(vg, *editing_, *t);
+            size_t line = 0;
+            for (size_t i = 0; i < L.lines.size(); ++i) {
+                if (L.lines[i].begin <= caret_) {
+                    line = i;
+                }
+            }
+            const auto& span = L.lines[line];
+            size_t end = std::min(caret_, span.end);
+            double x = L.line_x[line] +
+                       text::measure(vg, text::Hand,
+                                     editing_->text.substr(span.begin, end - span.begin),
+                                     L.px);
+            double y = L.top + line * L.px * text::line_height;
+            nvgBeginPath(vg);
+            nvgRect(vg, float(x), float(y + L.px * 0.1), float(std::max(1.0, L.px / 16)),
+                    float(L.px * text::line_height * 0.85));
+            nvgFillColor(vg, accent);
+            nvgFill(vg);
+        }
+    }
+
+    // Empty map welcome.
+    if (anchor_ == root_.get() && root_->children.empty() && !editing_) {
+        text::draw_line(vg, text::Hand, "Draw something, then scroll to zoom into it",
+                        win_w_ / 2.0 - text::measure(vg, text::Hand,
+                                                     "Draw something, then scroll to zoom into it", 24) / 2,
+                        win_h_ / 2.0 - 30, 24, ui::rgb(0xadb5bd),
+                        {0, 0, double(win_w_), double(win_h_)});
+    }
+}
+
+// ---------------------------------------------------------------- ui
+
+void App::add_hit(Rect r, std::function<void()> action) {
+    next_hits_.push_back({r, std::move(action)});
+}
+
+bool App::ui_click(Vec2 p) {
+    for (auto it = hits_.rbegin(); it != hits_.rend(); ++it) {
+        if (it->r.contains(p)) {
+            if (it->action) {
+                it->action();
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool App::button(Rect r, ui::Icon icon, bool active, std::function<void()> action,
+                 const char* hint) {
+    bool hovered = r.contains(mouse_) && drag_ == Drag::None;
+    ui::button_bg(vg_, r, active, hovered);
+    ui::icon(vg_, icon, r, ui::rgb(active ? 0x030064 : ui::ink));
+    if (hint) {
+        ui::label(vg_, hint, r.right() - 3, r.bottom() - 2, 9, ui::rgb(ui::muted),
+                  false, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+    }
+    add_hit(r, std::move(action));
+    return hovered;
+}
+
+bool App::style_panel_visible() const {
+    if (!selection_.empty()) {
+        return true;
+    }
+    return is_shape_tool(tool_) || tool_ == Tool::Text;
+}
+
+void App::draw_style_panel() {
+    NVGcontext* vg = vg_;
+    // Values shown: the first selected node, or the style for new shapes.
+    Node* first = selection_.empty() ? nullptr : selection_[0];
+    uint32_t stroke = first ? first->style.stroke : style_.stroke;
+    uint32_t fill = first ? first->style.fill : style_.fill;
+    FillStyle fill_style = first ? first->style.fill_style : style_.fill_style;
+    int roughness = first ? first->style.roughness : style_.roughness;
+    double sw_px = stroke_px_, font_px = font_px_;
+    if (first) {
+        if (auto tp = xform_of(first->parent)) {
+            sw_px = first->style.stroke_width * tp->s;
+            font_px = first->style.font_size * tp->s;
+        }
+    }
+    bool has_text = tool_ == Tool::Text;
+    bool has_shape = is_shape_tool(tool_) && tool_ != Tool::Draw &&
+                     tool_ != Tool::Line && tool_ != Tool::Arrow;
+    for (Node* n : selection_) {
+        has_text |= n->kind == Kind::Text || (!n->text.empty() && n->kind != Kind::Pdf);
+        has_shape |= n->kind == Kind::Rect || n->kind == Kind::Ellipse ||
+                     n->kind == Kind::Diamond;
+    }
+
+    double x = 16, y = 72, w = 204;
+    double rows = 3 + (has_shape ? 2 : 0) + (has_text ? 1 : 0) + (first ? 1 : 0);
+    double h = 16 + rows * 58;
+    ui::island(vg, {x, y, w, h});
+    add_hit({x, y, w, h}, nullptr);
+
+    double cx = x + 12, cy = y + 12;
+    auto section = [&](const char* title) {
+        ui::label(vg, title, cx, cy + 6, 11.5f, ui::rgb(0x495057));
+        cy += 18;
+    };
+    auto set_style = [this](std::function<void(Style&)> f) {
+        f(style_);
+        apply_to_selection([&](Node& n) { f(n.style); });
+    };
+
+    section("Stroke");
+    for (int i = 0; i < 5; ++i) {
+        Rect r{cx + i * 32, cy, 26, 26};
+        uint32_t c = ui::stroke_colors[i];
+        ui::swatch(vg, r, c, stroke == c);
+        add_hit(r, [=] { set_style([c](Style& s) { s.stroke = c; }); });
+    }
+    cy += 40;
+
+    if (has_shape) {
+        section("Background");
+        for (int i = 0; i < 5; ++i) {
+            Rect r{cx + i * 32, cy, 26, 26};
+            uint32_t c = ui::fill_colors[i];
+            ui::swatch(vg, r, c, fill == c);
+            add_hit(r, [=] { set_style([c](Style& s) { s.fill = c; }); });
+        }
+        cy += 40;
+        section("Fill");
+        ui::Icon fills[3] = {ui::Icon::Hachure, ui::Icon::CrossHatch, ui::Icon::Solid};
+        for (int i = 0; i < 3; ++i) {
+            FillStyle fs = FillStyle(i);
+            button({cx + i * 36, cy, 32, 32}, fills[i], fill_style == fs,
+                   [=] { set_style([fs](Style& s) { s.fill_style = fs; }); });
+        }
+        cy += 40;
+    }
+
+    section("Stroke width");
+    ui::Icon widths[3] = {ui::Icon::Thin, ui::Icon::Bold, ui::Icon::ExtraBold};
+    double px_values[3] = {1, 2, 4};
+    for (int i = 0; i < 3; ++i) {
+        double px = px_values[i];
+        button({cx + i * 36, cy, 32, 32}, widths[i], std::abs(sw_px - px) < 0.25,
+               [this, px] {
+                   stroke_px_ = px;
+                   apply_to_selection([&](Node& n) {
+                       if (auto tp = xform_of(n.parent)) {
+                           n.style.stroke_width = px / tp->s;
+                       }
+                   });
+               });
+    }
+    cy += 40;
+
+    section("Sloppiness");
+    ui::Icon rough_icons[3] = {ui::Icon::Architect, ui::Icon::Artist, ui::Icon::Cartoonist};
+    for (int i = 0; i < 3; ++i) {
+        button({cx + i * 36, cy, 32, 32}, rough_icons[i], roughness == i,
+               [=] { set_style([i](Style& s) { s.roughness = i; }); });
+    }
+    cy += 40;
+
+    if (has_text) {
+        section("Font size");
+        const char* names[4] = {"S", "M", "L", "XL"};
+        double sizes[4] = {16, 20, 28, 36};
+        for (int i = 0; i < 4; ++i) {
+            Rect r{cx + i * 36, cy, 32, 32};
+            bool active = std::abs(font_px - sizes[i]) < 0.5;
+            ui::button_bg(vg, r, active, r.contains(mouse_));
+            ui::label(vg, names[i], r.center().x, r.center().y, 13,
+                      ui::rgb(ui::ink), true, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            double px = sizes[i];
+            add_hit(r, [this, px] {
+                font_px_ = px;
+                apply_to_selection([&](Node& n) {
+                    if (auto tp = xform_of(n.parent)) {
+                        n.style.font_size = px / tp->s;
+                        if (n.kind == Kind::Text) {
+                            fit_text_bounds(vg_, n);
+                        }
+                    }
+                });
+            });
+        }
+        cy += 40;
+    }
+
+    if (first) {
+        section("Actions");
+        button({cx, cy, 32, 32}, ui::Icon::ToBack, false, [this] { move_layer(false); });
+        button({cx + 36, cy, 32, 32}, ui::Icon::ToFront, false, [this] { move_layer(true); });
+        button({cx + 72, cy, 32, 32}, ui::Icon::Duplicate, false,
+               [this] { duplicate_selection(); });
+        button({cx + 108, cy, 32, 32}, ui::Icon::Trash, false, [this] { delete_selection(); });
+    }
+}
+
+void App::draw_ui() {
+    NVGcontext* vg = vg_;
+
+    // Toolbar, top center.
+    struct ToolDef {
+        Tool tool;
+        ui::Icon icon;
+        const char* key;
+    };
+    static const ToolDef tools[] = {
+        {Tool::Hand, ui::Icon::Hand, "H"},       {Tool::Select, ui::Icon::Select, "1"},
+        {Tool::Rect, ui::Icon::Rect, "2"},       {Tool::Diamond, ui::Icon::Diamond, "3"},
+        {Tool::Ellipse, ui::Icon::Ellipse, "4"}, {Tool::Arrow, ui::Icon::Arrow, "5"},
+        {Tool::Line, ui::Icon::Line, "6"},       {Tool::Draw, ui::Icon::Draw, "7"},
+        {Tool::Text, ui::Icon::Text, "8"},       {Tool::Image, ui::Icon::Image, "9"},
+        {Tool::Eraser, ui::Icon::Eraser, "0"},
+    };
+    int n_tools = int(std::size(tools));
+    double bw = 36, gap = 2, pad = 4;
+    double tw = n_tools * bw + (n_tools - 1) * gap + 2 * pad;
+    Rect bar{std::round((win_w_ - tw) / 2), 16, tw, bw + 2 * pad};
+    ui::island(vg, bar);
+    add_hit(bar, nullptr);
+    for (int i = 0; i < n_tools; ++i) {
+        Rect r{bar.x + pad + i * (bw + gap), bar.y + pad, bw, bw};
+        Tool t = tools[i].tool;
+        button(r, tools[i].icon, tool_ == t, [this, t] { set_tool(t); }, tools[i].key);
+    }
+
+    // Breadcrumb, top left: where you are in the zoom hierarchy.
+    std::vector<Node*> path;
+    for (Node* p = anchor_; p; p = p->parent) {
+        path.insert(path.begin(), p);
+    }
+    if (path.size() > 4) {
+        path.erase(path.begin() + 1, path.end() - 3);
+        path.insert(path.begin() + 1, nullptr); // "…"
+    }
+    {
+        double x = 28, cy = 16 + 22;
+        double total = 24;
+        std::vector<double> widths;
+        nvgFontFace(vg, "ui-medium");
+        nvgFontSize(vg, 13);
+        for (Node* p : path) {
+            std::string name = p ? display_name(*p) : "…";
+            float b[4];
+            double wdt = nvgTextBounds(vg, 0, 0, name.c_str(), nullptr, b);
+            widths.push_back(wdt);
+            total += wdt + 22;
+        }
+        total -= 22;
+        Rect island{16, 16, std::min(total, bar.x - 32), 44};
+        if (island.w > 60) {
+            ui::island(vg, island);
+            add_hit(island, nullptr);
+            nvgSave(vg);
+            nvgScissor(vg, float(island.x), float(island.y), float(island.w - 8),
+                       float(island.h));
+            for (size_t i = 0; i < path.size(); ++i) {
+                Node* p = path[i];
+                bool last = i + 1 == path.size();
+                std::string name = p ? display_name(*p) : "…";
+                Rect hit{x - 4, island.y + 8, widths[i] + 8, 28};
+                if (p && !last && hit.contains(mouse_)) {
+                    ui::button_bg(vg, hit, false, true);
+                }
+                ui::label(vg, name, x, cy, 13,
+                          ui::rgb(last ? ui::ink : 0x495057), last);
+                if (p && !last) {
+                    add_hit(hit, [this, p] { fly_to(p); });
+                }
+                x += widths[i];
+                if (!last) {
+                    ui::label(vg, "›", x + 11, cy, 14, ui::rgb(ui::muted), false,
+                              NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    x += 22;
+                }
+            }
+            nvgRestore(vg);
+        }
+    }
+
+    // Save status + git commit, top right.
+    {
+        Rect r{win_w_ - 16.0 - 150, 16, 150, 44};
+        ui::island(vg, r);
+        add_hit(r, nullptr);
+        ui::label(vg, save_status_, r.x + 14, r.center().y, 12.5f, ui::rgb(ui::muted));
+        Rect b{r.right() - 4 - 72, r.y + 6, 72, 32};
+        bool hovered = b.contains(mouse_);
+        ui::button_bg(vg, b, false, hovered);
+        ui::icon(vg, ui::Icon::Git, {b.x + 2, b.y, 28, 32}, ui::rgb(ui::ink));
+        ui::label(vg, "Commit", b.x + 28, b.center().y, 12.5f, ui::rgb(ui::ink), true);
+        add_hit(b, [this] {
+            flush();
+            toast(store::git_commit(dir_));
+        });
+    }
+
+    if (style_panel_visible()) {
+        draw_style_panel();
+    }
+
+    // Zoom level + undo/redo, bottom left.
+    {
+        double y = win_h_ - 16.0 - 40;
+        Rect z{16, y, 156, 40};
+        ui::island(vg, z);
+        add_hit(z, nullptr);
+        Vec2 center{win_w_ / 2.0, win_h_ / 2.0};
+        button({z.x + 4, z.y + 4, 32, 32}, ui::Icon::Minus, false,
+               [this, center] { cam_.zoom_at(center, 1 / 1.6); });
+        ui::label(vg, std::format("Level {}", depth(anchor_)), z.center().x,
+                  z.center().y, 12.5f, ui::rgb(ui::ink), true,
+                  NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        add_hit({z.x + 40, z.y, 76, 40}, [this] { fly_out(); });
+        button({z.right() - 36, z.y + 4, 32, 32}, ui::Icon::Plus, false,
+               [this, center] { cam_.zoom_at(center, 1.6); });
+
+        Rect u{z.right() + 8, y, 76, 40};
+        ui::island(vg, u);
+        add_hit(u, nullptr);
+        button({u.x + 4, u.y + 4, 32, 32}, ui::Icon::Undo, false, [this] { undo(); });
+        button({u.x + 40, u.y + 4, 32, 32}, ui::Icon::Redo, false, [this] { redo(); });
+    }
+
+    // Hint, bottom right.
+    ui::label(vg, "Scroll to zoom  ·  Enter dives into a shape  ·  Esc zooms out",
+              win_w_ - 20.0, win_h_ - 36.0, 12, ui::rgb(0xadb5bd), false,
+              NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+
+    // Toast, bottom center.
+    if (now_ < toast_until_ && !toast_.empty()) {
+        nvgFontFace(vg, "ui-medium");
+        nvgFontSize(vg, 13);
+        float b[4];
+        double tw2 = nvgTextBounds(vg, 0, 0, toast_.c_str(), nullptr, b) + 32;
+        Rect r{(win_w_ - tw2) / 2, win_h_ - 16.0 - 40, tw2, 40};
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, float(r.x), float(r.y), float(r.w), float(r.h), 8);
+        nvgFillColor(vg, ui::rgb(0x1b1b1f, 235));
+        nvgFill(vg);
+        ui::label(vg, toast_, r.center().x, r.center().y, 13, nvgRGB(255, 255, 255),
+                  true, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    }
+}

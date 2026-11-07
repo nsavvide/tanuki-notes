@@ -1,60 +1,85 @@
 #pragma once
 
-#include <SDL3/SDL_pixels.h>
+#include "geom.hpp"
+
+#include <nlohmann/json_fwd.hpp>
+
+#include <cstdint>
 #include <memory>
-#include <utility>
+#include <string>
 #include <vector>
 
+enum class Kind {
+    Root,
+    Rect,
+    Ellipse,
+    Diamond,
+    Text,
+    Line,
+    Arrow,
+    Draw,
+    Image,
+    Pdf,     // container holding PdfPage children
+    PdfPage, // one rendered page of the Pdf parent's file
+};
+
+enum class FillStyle { Hachure, CrossHatch, Solid };
+
+// Colors are 0xRRGGBBAA.
+struct Style {
+    uint32_t stroke = 0x1e1e1eff;
+    uint32_t fill = 0x00000000; // alpha 0 = transparent
+    FillStyle fill_style = FillStyle::Hachure;
+    double stroke_width = 0; // in PARENT local units
+    int roughness = 1;       // 0 architect, 1 artist, 2 cartoonist
+    double font_size = 0;    // in PARENT local units
+};
+
 struct Node {
-    double x, y, w, h; // rect in the PARENT's local units
-    SDL_Color color;
+    std::string id;
+    Kind kind = Kind::Rect;
+    double x = 0, y = 0, w = 1, h = 1; // bbox in the PARENT's local units
+    Style style;
+    std::string text;         // text node content, or a shape's label
+    std::vector<Vec2> points; // Line/Arrow/Draw: normalized 0..1 in bbox
+    std::string asset;        // Image/Pdf: path relative to the map folder
+    int page = 0;             // PdfPage: page index
+    uint32_t seed = 1;        // keeps the hand-drawn wobble stable
+
     Node* parent = nullptr;
     std::vector<std::unique_ptr<Node>> children;
 
-    Node(double x, double y, double w, double h, SDL_Color color)
-        : x(x), y(y), w(w), h(h), color(color) {}
+    double aspect() const { return h / w; }
+    Rect rect() const { return {x, y, w, h}; }
+
+    // Can hold children (and be zoomed into).
+    bool is_container() const {
+        return kind == Kind::Root || kind == Kind::Rect ||
+               kind == Kind::Ellipse || kind == Kind::Diamond ||
+               kind == Kind::Pdf;
+    }
+    bool is_linear() const {
+        return kind == Kind::Line || kind == Kind::Arrow || kind == Kind::Draw;
+    }
 };
 
-inline Node& add_child(Node& parent, double x, double y, double w, double h,
-                       SDL_Color color) {
-    auto child = std::make_unique<Node>(x, y, w, h, color);
-    child->parent = &parent;
-    parent.children.push_back(std::move(child));
-    return *parent.children.back();
-}
+std::string new_id();
+const char* kind_name(Kind k);
 
-// Fills `node` with a 3x3 grid of children; only the center one recurses.
-// Every node keeps the same aspect ratio, so its local space is always
-// 1 wide and `aspect` high.
-inline void fill_test_grid(Node& node, int depth, double aspect) {
-    if (depth == 0) {
-        return;
-    }
+std::unique_ptr<Node> make_node(Kind kind);
+Node& add_child(Node& parent, std::unique_ptr<Node> child);
+std::unique_ptr<Node> detach(Node& node);
+int index_in_parent(const Node& node);
+Node* find_by_id(Node& root, const std::string& id);
+bool is_ancestor(const Node* ancestor, const Node* node);
+int depth(const Node* node);
 
-    const SDL_Color dark{0, 52, 60, 255};
-    const SDL_Color light{225, 235, 236, 255};
-    SDL_Color color = depth % 2 == 0 ? dark : light;
+// First line of the text, or the kind name.
+std::string display_name(const Node& node);
 
-    const double padding = 0.02;
-    double w = 1.0 / 3.0 - 2 * padding;
-    double h = w * aspect;
+// Serialization. `recursive` includes children under "children".
+nlohmann::json node_to_json(const Node& node, bool recursive);
+std::unique_ptr<Node> node_from_json(const nlohmann::json& j);
 
-    for (int j = 0; j < 3; ++j) {
-        for (int i = 0; i < 3; ++i) {
-            double x = i / 3.0 + padding;
-            double y = j * aspect / 3.0 + (aspect / 3.0 - h) / 2;
-            Node& child = add_child(node, x, y, w, h, color);
-            if (i == 1 && j == 1) {
-                fill_test_grid(child, depth - 1, aspect);
-            }
-        }
-    }
-}
-
-// Root lives in camera space (400 x 300 world units).
-inline std::unique_ptr<Node> make_test_tree(int depth) {
-    auto root =
-        std::make_unique<Node>(0, 0, 400, 300, SDL_Color{0, 52, 60, 255});
-    fill_test_grid(*root, depth, root->h / root->w);
-    return root;
-}
+// Root of an empty map.
+std::unique_ptr<Node> make_root();
