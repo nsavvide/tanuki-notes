@@ -29,33 +29,31 @@ The fonts are compiled into the binary, so after `install` you can run
 | Pan | middle-drag, space + drag, hand tool, shift + scroll |
 | Dive into a shape | double-click inside it (not on its label), Enter, or mouse forward button |
 | Zoom out one level | Esc or Backspace (with nothing selected), mouse back button, or the level badge; the shape you left stays selected, so Esc again keeps going out |
-| Write in nvim | `o` on a selected note/shape/code block (or `o` on nothing for a new note): opens nvim in a terminal, every `:w` updates the map |
-| Code block | `c`, then write it in nvim; pick the language in the left panel |
+| Code block | in a note, type ```` ```py ```` (or rs, cpp, ts, …) and Enter; ```` ``` ```` + Enter ends it. Change the language in the left panel |
 | Fit everything | Home or Shift+1 |
 | Jump to a parent | click it in the breadcrumb (top left) |
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
 | Attach an arrow | start or end it on a shape; it follows when the shape moves or resizes |
 | Detach an arrow | drag its end off the shape, or move the arrow by itself |
-| Label a shape / edit text | double-click the label (or a blank new shape) |
+| Label a shape / edit text | double-click the label (or a blank new shape), or Enter on a selected note |
 | New text | double-click the background, or T |
 | Insert image or PDF | 9, drag and drop a file, or paste an image |
 | Move into / out of a shape | drag it inside or outside another shape |
 | Save + git commit | Ctrl+S or the Commit button |
 
-Tools: 1 select, 2 rectangle, 3 diamond, 4 ellipse, 5 arrow, 6 line,
-7 pen, 8 text, 9 image/PDF, 0 eraser; hold Space to pan.
+Tools: H hand, V/1 select, R/2 rectangle, D/3 diamond, O/4 ellipse,
+A/5 arrow, L/6 line, P/7 pen, T/8 text, 9 image/PDF, E/0 eraser.
 
-Vim keys: h/j/k/l select the nearest shape that way (Shift+hjkl moves it
-10 px), i edit in place, o write in nvim, c new code block, y copy,
-p paste, x delete, u undo, Ctrl+R redo.
+Writing is vim: you start in Insert mode; Esc goes to Normal mode, Esc
+again (or a click elsewhere) finishes. Normal mode has h j k l w b e 0 ^ $
+gg G f F t T with counts, d c y with any motion (dd, cw, ciw, d$, 3dw…),
+x X s S D C r J ~, i a I A o O, p P, u and Ctrl+R, and v / V visual mode.
+The mode shows at the bottom of the window.
 
 Editing: Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+C/X/V, Ctrl+D duplicate,
 Ctrl+A select all, Delete, arrow keys nudge (Shift = 10 px),
 Ctrl+] / Ctrl+[ bring to front / send to back.
 
-nvim opens in `$TERMINAL`, else the first of kitty, ghostty, foot,
-alacritty or wezterm. Notes open as Markdown, code blocks with their
-language's extension, so your nvim config (LSP, treesitter) applies.
 
 ## The map folder (git-friendly)
 

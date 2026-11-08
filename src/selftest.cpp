@@ -8,6 +8,7 @@
 #include "code.hpp"
 #include "render.hpp"
 #include "store.hpp"
+#include "vim.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -52,14 +53,25 @@ void click(App& app, Vec2 p, int clicks = 1) {
 
 void type(App& app, const char* s) { app.text_input(s); }
 
+// Esc twice: Insert -> Normal -> done editing.
+void finish_edit(App& app) {
+    app.key_down(SDLK_ESCAPE, {});
+    app.key_down(SDLK_ESCAPE, {});
+}
+
+// Vim keys typed in Normal mode, one character at a time.
+void keys(App& app, std::string_view ks) {
+    for (char c : ks) {
+        app.text_input(std::string(1, c).c_str());
+    }
+}
+
 } // namespace
 
 int run_selftest(NVGcontext* vg, SDL_Window* window) {
     fs::path dir = fs::temp_directory_path() /
                    ("tanuki-selftest-" + std::to_string(getpid()));
     fs::remove_all(dir);
-    // "Terminal" that exits at once: the tests never open real nvim windows.
-    setenv("TERMINAL", "true", 1);
     {
         App app(vg, window, dir);
         tick(app);
@@ -105,7 +117,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         click(app, {300, 720});
         type(app, "hello");
         type(app, " zoom");
-        app.key_down(SDLK_ESCAPE, {});
+        finish_edit(app);
         tick(app);
         bool found = false;
         for (auto& c : app.root().children) {
@@ -118,7 +130,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         app.mouse_down({400, 375}, SDL_BUTTON_LEFT, 2, {});
         app.mouse_up({400, 375}, SDL_BUTTON_LEFT, {});
         type(app, "Rust");
-        app.key_down(SDLK_ESCAPE, {});
+        finish_edit(app);
         CHECK(small->text == "Rust");
 
         // Deep nesting: 80 levels inside `small`, then zoom all the way in.
@@ -294,7 +306,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             click(app, {300, 250}, 2);
             CHECK(app.editing_ == box);
             type(app, "Box");
-            app.key_down(SDLK_ESCAPE, {});
+            finish_edit(app);
             click(app, {1200, 750});
             tick(app);
             app.render(1); // label drawn centered
@@ -332,7 +344,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         fs::remove_all(d);
     }
 
-    // Code blocks, nvim sync and vim keys.
+    // Vim editing, code highlighting and ``` fences.
     {
         bool block = false;
         auto toks = code::highlight("rust", "let x = \"hi\"; // note", block);
@@ -343,6 +355,44 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         CHECK(block);
         CHECK(code::highlight("cpp", "still */ b", block).front().kind == code::Tok::Comment);
         CHECK(!block);
+        CHECK(code::from_fence("py") == "python" && code::from_fence("C++") == "cpp");
+
+        // The vim engine on its own.
+        auto run = [](std::string text, size_t caret, std::string_view ks) {
+            vim::Editor e;
+            e.begin(text, caret);
+            e.to_normal(text, caret);
+            for (char c : ks) {
+                if (e.mode == vim::Mode::Insert) {
+                    text.insert(caret, 1, c);
+                    ++caret;
+                } else {
+                    e.key(text, caret, std::string(1, c));
+                }
+            }
+            return std::pair{text, caret};
+        };
+        CHECK(run("hello world", 0, "dw").first == "world");
+        CHECK(run("hello world", 0, "wD").first == "hello ");
+        CHECK(run("one two three", 0, "2dw").first == "three");
+        CHECK(run("one two three", 5, "ciwTWO").first == "one TWO three");
+        CHECK(run("one two three", 0, "cwONE").first == "ONE two three");
+        CHECK(run("a\nb\nc", 0, "jdd").first == "a\nc");
+        CHECK(run("a\nb\nc", 0, "yyjp").first == "a\nb\na\nc");
+        CHECK(run("a\nb\nc", 0, "Gdd").first == "a\nb");
+        CHECK(run("abc", 0, "xxu").first == "bc");
+        CHECK(run("abc", 0, "$x").first == "ab");
+        CHECK(run("foo(bar)", 0, "f(lD").first == "foo(");
+        CHECK(run("abc def", 0, "veD").first == "abc def"); // D in visual: no-op
+        CHECK(run("abc def", 0, "vey$p").first == "abc defabc");
+        CHECK(run("x\ny\nz", 0, "Vjd").first == "z");
+        CHECK(run("one\ntwo", 0, "Jx").first == "onetwo");
+        CHECK(run("ab", 0, "rZ").first == "Zb");
+        CHECK(run("hi", 0, "A!").first == "hi!");
+        CHECK(run("hi", 0, "oyo").first == "hi\nyo");
+        CHECK(run("hello", 4, "0").second == 0);
+        CHECK(run("hello", 0, "$").second == 4);
+        CHECK(run("añb", 0, "lx").first == "ab"); // multi-byte character
 
         fs::path d = dir;
         d += "-vim";
@@ -350,56 +400,67 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         {
             App app(vg, window, d);
             tick(app);
-            app.mouse_move({640, 400}, {});
-            app.key_down(SDLK_C, {});
-            CHECK(app.root().children.size() == 1);
-            Node* code = app.root().children[0].get();
-            CHECK(code->kind == Kind::Code && code->lang == "cpp");
 
-            // A save in nvim: the file changes, the next frame picks it up.
-            fs::path f = d / "edit.cpp";
-            std::ofstream(f) << "int main() {\n    return 0;\n}\n";
-            app.nvim_edits_.push_back({code->id, f, fs::file_time_type::min(), nullptr});
-            double w0 = code->w;
-            tick(app);
-            CHECK(code->text == "int main() {\n    return 0;\n}");
-            CHECK(code->w >= w0);
-            CHECK(std::ranges::none_of(app.nvim_edits_, // no process: session ends
-                                       [&](auto& e) { return e.file == f; }));
+            // In the app: Esc to Normal, edit with vim keys, Esc again to finish.
+            app.set_tool(Tool::Text);
+            click(app, {200, 200});
+            type(app, "hello world");
+            app.key_down(SDLK_ESCAPE, {});
+            CHECK(app.vim_.mode == vim::Mode::Normal && app.editing_);
+            keys(app, "0dw");
+            CHECK(app.editing_->text == "world");
+            keys(app, "A!");
+            type(app, "!");
+            CHECK(app.editing_->text == "world!!");
+            finish_edit(app);
+            CHECK(!app.editing_);
+            Node* note = app.root().children[0].get();
+            app.render(1);
+
+            // ```py + Enter in an empty note turns it into a code block.
+            app.set_tool(Tool::Text);
+            click(app, {200, 400});
+            type(app, "```py");
+            app.key_down(SDLK_RETURN, {});
+            Node* code = app.root().children[1].get();
+            CHECK(code->kind == Kind::Code && code->lang == "python" && code->text.empty());
+            CHECK(app.editing_ == code);
+            type(app, "def f():");
+            app.key_down(SDLK_RETURN, {});
+            type(app, "return 1"); // indented by the line above? no: none to keep
+            app.key_down(SDLK_RETURN, {});
+            app.key_down(SDLK_TAB, {});
+            type(app, "x");
+            app.key_down(SDLK_RETURN, {}); // keeps the 4-space indent
+            type(app, "y");
+            CHECK(code->text == "def f():\nreturn 1\n    x\n    y");
+            // ``` + Enter closes the block and continues in a new note.
+            app.key_down(SDLK_RETURN, {});
+            type(app, "```");
+            app.key_down(SDLK_RETURN, {});
+            CHECK(code->text == "def f():\nreturn 1\n    x\n    y");
+            CHECK(app.editing_ && app.editing_->kind == Kind::Text && app.editing_ != note);
+            CHECK(app.editing_->y > code->y + code->h);
+            finish_edit(app); // left empty: dropped
+            CHECK(app.root().children.size() == 2);
+
+            // A fence after some text: the note keeps its text, the code
+            // block goes below it.
+            note->text.clear();
+            app.start_text_edit(*note);
+            type(app, "Notes");
+            app.key_down(SDLK_RETURN, {});
+            type(app, "```rs");
+            app.key_down(SDLK_RETURN, {});
+            CHECK(note->kind == Kind::Text && note->text == "Notes");
+            CHECK(app.editing_ && app.editing_->kind == Kind::Code &&
+                  app.editing_->lang == "rust");
+            type(app, "fn main() {}");
             for (int i = 0; i < 3; ++i) {
                 tick(app);
                 app.render(1);
             }
-
-            // hjkl walk between three boxes in a row.
-            click(app, {1200, 750});
-            for (double x : {100.0, 400.0, 700.0}) {
-                app.set_tool(Tool::Rect);
-                drag(app, {x, 600}, {x + 150, 700});
-            }
-            Node* b0 = app.root().children[1].get();
-            Node* b1 = app.root().children[2].get();
-            Node* b2 = app.root().children[3].get();
-            app.selection_ = {b0};
-            app.key_down(SDLK_L, {});
-            CHECK(app.selection_.size() == 1 && app.selection_[0] == b1);
-            app.key_down(SDLK_L, {});
-            CHECK(app.selection_[0] == b2);
-            app.key_down(SDLK_H, {});
-            CHECK(app.selection_[0] == b1);
-            app.key_down(SDLK_K, {}); // the code block is above
-            CHECK(app.selection_[0] == code);
-
-            // Enter dives in, Esc comes back out with the box selected.
-            app.selection_ = {b1};
-            app.key_down(SDLK_RETURN, {});
-            for (int i = 0; i < 120; ++i) {
-                tick(app);
-            }
-            CHECK(app.screen_rect_of(b1)->w > 800);
-            app.selection_.clear();
-            app.key_down(SDLK_ESCAPE, {});
-            CHECK(app.selection_.size() == 1 && app.selection_[0] == b1);
+            finish_edit(app);
         }
         fs::remove_all(d);
     }
@@ -470,14 +531,14 @@ void make_demo(App& app) {
         app.mouse_down(p, SDL_BUTTON_LEFT, 2, {});
         app.mouse_up(p, SDL_BUTTON_LEFT, {});
         type(app, s);
-        app.key_down(SDLK_ESCAPE, {});
+        finish_edit(app);
         click(app, {1250, 780});
     };
     auto note = [&](Vec2 p, const char* s) {
         app.set_tool(Tool::Text);
         click(app, p);
         type(app, s);
-        app.key_down(SDLK_ESCAPE, {});
+        finish_edit(app);
     };
 
     note({90, 120}, "My knowledge");

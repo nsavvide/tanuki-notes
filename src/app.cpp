@@ -9,9 +9,6 @@
 #include <nlohmann/json.hpp>
 
 #include <cmath>
-#include <fstream>
-#include <sstream>
-#include <unistd.h>
 #include <format>
 #include <map>
 #include <unordered_map>
@@ -206,19 +203,7 @@ App::App(NVGcontext* vg, SDL_Window* window, fs::path map_dir)
     history_pos_ = 0;
 }
 
-App::~App() {
-    poll_nvim();
-    flush();
-    for (auto& e : nvim_edits_) {
-        if (e.proc) {
-            SDL_DestroyProcess(e.proc); // nvim stays open; it's the user's
-        }
-    }
-    if (!nvim_edits_.empty()) {
-        std::error_code ec;
-        fs::remove_all(nvim_edits_[0].file.parent_path(), ec);
-    }
-}
+App::~App() { flush(); }
 
 void App::flush() {
     try {
@@ -707,6 +692,7 @@ void App::start_text_edit(Node& n, bool) {
     }
     editing_ = &n;
     caret_ = n.text.size();
+    vim_.begin(n.text, caret_);
     caret_blink_start_ = now_;
     selection_ = {&n};
     SDL_StartTextInput(window_);
@@ -1007,147 +993,68 @@ void App::insert_file(const std::string& path, Vec2 center) {
     commit();
 }
 
-// ---------------------------------------------------------------- nvim + vim keys
+// ---------------------------------------------------------------- editing
 
-namespace {
-
-std::string which(const std::string& exe) {
-    const char* env = std::getenv("PATH");
-    std::string path = env ? env : "";
-    size_t start = 0;
-    while (true) {
-        size_t colon = path.find(':', start);
-        std::string dir = path.substr(start, colon - start);
-        fs::path f = fs::path(dir) / exe;
-        if (!dir.empty() && access(f.c_str(), X_OK) == 0) {
-            return f.string();
-        }
-        if (colon == std::string::npos) {
-            return "";
-        }
-        start = colon + 1;
+void App::refit_editing() {
+    if (editing_ && editing_->kind == Kind::Text) {
+        fit_text_bounds(vg_, *editing_);
+    } else if (editing_ && editing_->kind == Kind::Code) {
+        fit_code_bounds(vg_, *editing_);
     }
 }
 
-// Command that opens a terminal window running `nvim file`.
-std::vector<std::string> nvim_command(const std::string& file) {
-    if (const char* t = std::getenv("TERMINAL"); t && *t) {
-        return {t, "-e", "nvim", file};
-    }
-    struct Term {
-        const char* exe;
-        std::vector<std::string> args;
-    };
-    static const Term known[] = {{"kitty", {"--title", "tanuki"}},
-                                 {"ghostty", {"-e"}},
-                                 {"foot", {}},
-                                 {"alacritty", {"-e"}},
-                                 {"wezterm", {"start", "--"}}};
-    for (const Term& t : known) {
-        if (!which(t.exe).empty()) {
-            std::vector<std::string> cmd{t.exe};
-            cmd.insert(cmd.end(), t.args.begin(), t.args.end());
-            cmd.insert(cmd.end(), {"nvim", file});
-            return cmd;
-        }
-    }
-    return {};
+// Removes the line the caret is on, with the line break before it.
+static void erase_caret_line(std::string& s, size_t& caret) {
+    size_t ls = line_start(s, caret);
+    size_t le = s.find('\n', caret);
+    le = le == std::string::npos ? s.size() : le;
+    size_t a = ls > 0 ? ls - 1 : ls;
+    s.erase(a, le - a);
+    caret = a;
 }
 
-} // namespace
-
-void App::open_in_nvim(Node& n) {
-    finish_text_edit();
-    for (auto it = nvim_edits_.begin(); it != nvim_edits_.end(); ++it) {
-        if (it->id == n.id) {
-            if (it->proc && !SDL_WaitProcess(it->proc, false, nullptr)) {
-                toast("Already open in nvim");
-                return;
-            }
-            poll_nvim(); // picks up its last save and drops it
-            break;
-        }
-    }
-    fs::path dir = fs::temp_directory_path() / ("tanuki-" + std::to_string(getpid()));
-    fs::create_directories(dir);
-    bool is_code = n.kind == Kind::Code;
-    fs::path file = dir / std::format("{}-{}.{}", is_code ? "code" : "note", n.id,
-                                      is_code ? code::lang(n.lang).ext : "md");
-    {
-        std::ofstream out(file, std::ios::binary);
-        out << n.text << (n.text.empty() ? "" : "\n");
-    }
-    auto cmd = nvim_command(file.string());
-    std::vector<const char*> argv;
-    for (const auto& a : cmd) {
-        argv.push_back(a.c_str());
-    }
-    argv.push_back(nullptr);
-    SDL_Process* proc = cmd.empty() ? nullptr : SDL_CreateProcess(argv.data(), false);
-    if (!proc) {
-        toast("No terminal found for nvim (set $TERMINAL)");
-        fs::remove(file);
+void App::open_code_block(const std::string& tag) {
+    Node* note = editing_;
+    erase_caret_line(note->text, caret_);
+    std::string lang = code::from_fence(tag);
+    code_lang_ = lang;
+    double fs = note->style.font_size * 0.8;
+    if (note->text.find_first_not_of(" \n\t") == std::string::npos) {
+        // The note was just the fence: it becomes the code block.
+        note->kind = Kind::Code;
+        note->lang = lang;
+        note->text.clear();
+        note->style.font_size = fs;
+        caret_ = 0;
+        fit_code_bounds(vg_, *note);
+        vim_.begin(note->text, 0);
         return;
     }
-    nvim_edits_.push_back({n.id, file, fs::last_write_time(file), proc});
+    fit_text_bounds(vg_, *note);
+    auto c = make_node(Kind::Code);
+    c->lang = lang;
+    c->style = note->style;
+    c->style.font_size = fs;
+    fit_code_bounds(vg_, *c);
+    c->x = note->x;
+    c->y = note->y + note->h + note->style.font_size * 0.5;
+    Node& added = add_child(*note->parent, std::move(c));
+    start_text_edit(added);
 }
 
-// Each save in nvim (:w) lands in the map; closing nvim ends the session.
-void App::poll_nvim() {
-    for (auto it = nvim_edits_.begin(); it != nvim_edits_.end();) {
-        bool running = it->proc && !SDL_WaitProcess(it->proc, false, nullptr);
-        Node* n = find_by_id(*root_, it->id);
-        std::error_code ec;
-        auto mtime = fs::last_write_time(it->file, ec);
-        if (n && !ec && mtime != it->mtime) {
-            it->mtime = mtime;
-            std::ifstream in(it->file, std::ios::binary);
-            std::stringstream ss;
-            ss << in.rdbuf();
-            std::string s = ss.str();
-            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
-                s.pop_back();
-            }
-            if (s != n->text) {
-                n->text = std::move(s);
-                if (n->kind == Kind::Text) {
-                    fit_text_bounds(vg_, *n);
-                } else if (n->kind == Kind::Code) {
-                    fit_code_bounds(vg_, *n);
-                }
-                commit();
-            }
-        }
-        if (!n || !running) {
-            if (it->proc) {
-                SDL_DestroyProcess(it->proc);
-            }
-            fs::remove(it->file, ec);
-            it = nvim_edits_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void App::new_code_block(Vec2 at) {
-    Node* parent = container_at(at, nullptr);
-    auto tp = xform_of(parent);
-    if (!tp) {
-        return;
-    }
-    auto n = make_node(Kind::Code);
-    n->lang = code_lang_;
-    n->style = style_;
-    n->style.font_size = font_px_ * 0.8 / tp->s;
-    fit_code_bounds(vg_, *n);
-    Vec2 q = tp->to_local(at);
-    n->x = q.x - n->w / 2;
-    n->y = q.y - n->h / 2;
-    Node& added = add_child(*parent, std::move(n));
-    selection_ = {&added};
-    commit();
-    open_in_nvim(added);
+void App::close_code_block() {
+    Node* block = editing_;
+    erase_caret_line(block->text, caret_);
+    fit_code_bounds(vg_, *block);
+    // Carry on writing in a new note below (dropped again if left empty).
+    auto n = make_node(Kind::Text);
+    n->style = block->style;
+    n->style.font_size = block->style.font_size / 0.8;
+    n->x = block->x;
+    n->y = block->y + block->h + n->style.font_size * 0.5;
+    fit_text_bounds(vg_, *n);
+    Node& added = add_child(*block->parent, std::move(n));
+    start_text_edit(added);
 }
 
 void App::edit_selected() {
@@ -1155,61 +1062,9 @@ void App::edit_selected() {
         return;
     }
     Node& n = *selection_[0];
-    if (n.kind == Kind::Code) {
-        open_in_nvim(n);
-    } else if (n.kind == Kind::Text || n.kind == Kind::Rect ||
+    if (n.kind == Kind::Text || n.kind == Kind::Code || n.kind == Kind::Rect ||
                n.kind == Kind::Ellipse || n.kind == Kind::Diamond) {
         start_text_edit(n);
-    }
-}
-
-// hjkl: select the nearest sibling in that direction (or, with nothing
-// selected, the shape nearest the middle of the screen).
-void App::select_dir(Vec2 d) {
-    Rect screen{0, 0, double(win_w_), double(win_h_)};
-    Node* cur = selection_.size() == 1 ? selection_[0] : nullptr;
-    Node* world = cur ? cur->parent : container_at(screen.center(), nullptr);
-    if (!world) {
-        return;
-    }
-    Vec2 from = screen.center();
-    if (cur) {
-        if (auto r = screen_rect_of(cur)) {
-            from = r->center();
-        }
-    }
-    Node* best = nullptr;
-    double best_score = 1e300;
-    for (auto& c : world->children) {
-        if (c.get() == cur || c->kind == Kind::Line || c->kind == Kind::Arrow ||
-            c->kind == Kind::Draw || c->kind == Kind::PdfPage) {
-            continue;
-        }
-        auto r = screen_rect_of(c.get());
-        if (!r) {
-            continue;
-        }
-        Vec2 v = r->center() - from;
-        double along = v.x * d.x + v.y * d.y;
-        double across = std::abs(v.x * d.y - v.y * d.x);
-        if (cur && along <= 1) {
-            continue;
-        }
-        // Without a selection, any direction goes: start near the middle.
-        double score = cur ? along + 2 * across : length(v);
-        if (score < best_score) {
-            best_score = score;
-            best = c.get();
-        }
-    }
-    if (!best) {
-        return;
-    }
-    selection_ = {best};
-    // Keep it on screen.
-    if (auto r = screen_rect_of(best); r && !screen.expanded(-24).contains(r->center())) {
-        flying_ = false;
-        cam_.pan(screen.center().x - r->center().x, screen.center().y - r->center().y);
     }
 }
 
@@ -1656,12 +1511,8 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
     // label edited first, since it has nothing inside to dive into yet.
     Node* hit = pick(p);
     if (clicks >= 2) {
-        if (hit && hit->kind == Kind::Text) {
+        if (hit && (hit->kind == Kind::Text || hit->kind == Kind::Code)) {
             start_text_edit(*hit);
-            return;
-        }
-        if (hit && hit->kind == Kind::Code) {
-            open_in_nvim(*hit);
             return;
         }
         if (hit && !hit->is_container()) {
@@ -1986,25 +1837,87 @@ void App::key_down(SDL_Keycode key, Mods m) {
     if (editing_) {
         std::string& s = editing_->text;
         caret_blink_start_ = now_;
-        auto refit = [&] {
-            if (editing_->kind == Kind::Text) {
-                fit_text_bounds(vg_, *editing_);
+        auto refit = [&] { refit_editing(); };
+        if (vim_.mode != vim::Mode::Insert) {
+            // Normal and Visual mode: typed characters arrive in text_input.
+            auto feed = [&](const char* k) {
+                if (vim_.key(s, caret_, k)) {
+                    refit();
+                }
+            };
+            switch (key) {
+            case SDLK_ESCAPE:
+                if (vim_.mode == vim::Mode::Normal && vim_.pending().empty()) {
+                    finish_text_edit();
+                } else {
+                    vim_.mode = vim::Mode::Normal;
+                    vim_.cancel();
+                }
+                return;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+                if (m.ctrl) {
+                    finish_text_edit();
+                } else {
+                    feed("j");
+                }
+                return;
+            case SDLK_R:
+                if (m.ctrl && vim_.redo(s, caret_)) {
+                    refit();
+                }
+                return;
+            case SDLK_LEFT: case SDLK_BACKSPACE: feed("h"); return;
+            case SDLK_RIGHT: feed("l"); return;
+            case SDLK_UP: feed("k"); return;
+            case SDLK_DOWN: feed("j"); return;
+            default:
+                return;
             }
-        };
+        }
         switch (key) {
         case SDLK_ESCAPE:
-            finish_text_edit();
+            vim_.to_normal(s, caret_);
             return;
-        case SDLK_RETURN:
-        case SDLK_KP_ENTER:
-            if (m.ctrl) {
-                finish_text_edit();
-            } else {
-                s.insert(caret_, "\n");
-                ++caret_;
+        case SDLK_TAB:
+            if (editing_->kind == Kind::Code) {
+                s.insert(caret_, "    ");
+                caret_ += 4;
                 refit();
             }
             return;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER: {
+            if (m.ctrl) {
+                finish_text_edit();
+                return;
+            }
+            size_t ls = line_start(s, caret_);
+            size_t le = s.find('\n', caret_);
+            std::string line = s.substr(ls, caret_ - ls);
+            size_t a = line.find_first_not_of(" \t");
+            std::string trimmed = a == std::string::npos ? "" : line.substr(a);
+            while (!trimmed.empty() && trimmed.back() == ' ') {
+                trimmed.pop_back();
+            }
+            bool at_eol = le == caret_ || (le == std::string::npos && caret_ == s.size());
+            if (at_eol && editing_->kind == Kind::Text && trimmed.starts_with("```")) {
+                open_code_block(trimmed.substr(3));
+                return;
+            }
+            if (at_eol && editing_->kind == Kind::Code && trimmed == "```") {
+                close_code_block();
+                return;
+            }
+            // Code keeps the indentation of the line above.
+            std::string indent = editing_->kind == Kind::Code
+                                     ? line.substr(0, a == std::string::npos ? line.size() : a)
+                                     : "";
+            s.insert(caret_, "\n" + indent);
+            caret_ += 1 + indent.size();
+            refit();
+            return;
+        }
         case SDLK_BACKSPACE: {
             size_t p = prev_cp(s, caret_);
             s.erase(p, caret_ - p);
@@ -2153,7 +2066,6 @@ void App::key_down(SDL_Keycode key, Mods m) {
         }
         [[fallthrough]];
     case SDLK_DELETE:
-    case SDLK_X:
         delete_selection();
         return;
     case SDLK_LEFT: nudge(m.shift ? -10 : -1, 0); return;
@@ -2166,71 +2078,16 @@ void App::key_down(SDL_Keycode key, Mods m) {
     case SDLK_SLASH:
         open_search();
         return;
-    // Vim keys: hjkl select the next shape that way (Shift moves it),
-    // i edits in place, o writes in nvim, c adds a code block,
-    // y/p copy/paste, u undo (Ctrl+R redo), x delete.
-    case SDLK_H:
-    case SDLK_J:
-    case SDLK_K:
-    case SDLK_L: {
-        Vec2 d = key == SDLK_H ? Vec2{-1, 0}
-                 : key == SDLK_J ? Vec2{0, 1}
-                 : key == SDLK_K ? Vec2{0, -1}
-                                 : Vec2{1, 0};
-        if (m.shift) {
-            nudge(d.x * 10, d.y * 10);
-        } else {
-            select_dir(d);
-        }
-        return;
-    }
-    case SDLK_I:
-        edit_selected();
-        return;
-    case SDLK_O:
-        if (selection_.size() == 1) {
-            Node* n = selection_[0];
-            if (n->kind == Kind::Text || n->kind == Kind::Code ||
-                n->kind == Kind::Rect || n->kind == Kind::Ellipse ||
-                n->kind == Kind::Diamond) {
-                open_in_nvim(*n);
-            }
-        } else if (selection_.empty()) {
-            // A new note, written in nvim.
-            Vec2 at = Rect{0, 0, double(win_w_), double(win_h_)}.contains(mouse_)
-                          ? mouse_
-                          : Vec2{win_w_ / 2.0, win_h_ / 2.0};
-            Node* parent = container_at(at, nullptr);
-            auto tp = xform_of(parent);
-            if (!tp) {
-                return;
-            }
-            auto n = make_node(Kind::Text);
-            n->style = style_;
-            n->style.font_size = font_px_ / tp->s;
-            Vec2 q = tp->to_local(at);
-            n->x = q.x;
-            n->y = q.y;
-            fit_text_bounds(vg_, *n);
-            Node& added = add_child(*parent, std::move(n));
-            selection_ = {&added};
-            open_in_nvim(added);
-        }
-        return;
-    case SDLK_C:
-        new_code_block(Rect{0, 0, double(win_w_), double(win_h_)}.contains(mouse_)
-                           ? mouse_
-                           : Vec2{win_w_ / 2.0, win_h_ / 2.0});
-        return;
-    case SDLK_Y:
-        copy_selection();
-        return;
-    case SDLK_P:
-        paste(mouse_);
-        return;
-    case SDLK_U:
-        undo();
-        return;
+    case SDLK_H: set_tool(Tool::Hand); return;
+    case SDLK_V: set_tool(Tool::Select); return;
+    case SDLK_R: set_tool(Tool::Rect); return;
+    case SDLK_D: set_tool(Tool::Diamond); return;
+    case SDLK_O: set_tool(Tool::Ellipse); return;
+    case SDLK_A: set_tool(Tool::Arrow); return;
+    case SDLK_L: set_tool(Tool::Line); return;
+    case SDLK_P: set_tool(Tool::Draw); return;
+    case SDLK_T: set_tool(Tool::Text); return;
+    case SDLK_E: set_tool(Tool::Eraser); return;
     case SDLK_1:
         if (m.shift) {
             fly_to_content();
@@ -2262,13 +2119,21 @@ void App::text_input(const char* utf8) {
     if (!editing_) {
         return;
     }
-    std::string add = utf8;
-    editing_->text.insert(caret_, add);
-    caret_ += add.size();
     caret_blink_start_ = now_;
-    if (editing_->kind == Kind::Text) {
-        fit_text_bounds(vg_, *editing_);
+    std::string_view in = utf8;
+    // Outside Insert mode each character is a vim command; if one of them
+    // enters Insert mode, the rest is typed text.
+    while (!in.empty() && vim_.mode != vim::Mode::Insert) {
+        size_t j = 1;
+        while (j < in.size() && (in[j] & 0xc0) == 0x80) {
+            ++j;
+        }
+        vim_.key(editing_->text, caret_, in.substr(0, j));
+        in.remove_prefix(j);
     }
+    editing_->text.insert(caret_, in);
+    caret_ += in.size();
+    refit_editing();
 }
 
 // ---------------------------------------------------------------- frame
@@ -2289,7 +2154,6 @@ void App::update(double now, int win_w, int win_h) {
         insert_file(files[i], {win_w_ / 2.0 + 24.0 * i, win_h_ / 2.0 + 24.0 * i});
     }
 
-    poll_nvim();
     step_fly(dt);
     clamp_zoom();
     reroot();
@@ -2417,28 +2281,48 @@ void App::draw_overlay() {
         nvgStroke(vg);
     }
 
-    // Text caret.
-    if (editing_ && std::fmod(now_ - caret_blink_start_, 1.0) < 0.6) {
+    // Text caret: a bar in Insert mode, a block in Normal mode, and the
+    // Visual selection.
+    if (editing_) {
         if (auto t = xform_of(editing_)) {
-            TextLayout L = layout_text(vg, *editing_, *t);
-            size_t line = 0;
-            for (size_t i = 0; i < L.lines.size(); ++i) {
-                if (L.lines[i].begin <= caret_) {
-                    line = i;
+            const std::string& s = editing_->text;
+            auto box = [&](size_t pos) { return caret_box(vg, *editing_, *t, pos); };
+            if (vim_.mode == vim::Mode::Visual || vim_.mode == vim::Mode::VisualLine) {
+                auto [a, b] = vim_.selection(s, caret_);
+                for (const auto& span : screen_lines(vg, *editing_, *t)) {
+                    size_t sa = std::max(a, span.begin), sb = std::min(b, span.end);
+                    bool newline = b > span.end && a <= span.end && span.end < s.size();
+                    if (sa >= sb && !newline) {
+                        continue;
+                    }
+                    CaretBox A = box(sa), B = box(std::max(sa, sb));
+                    double w = B.x - A.x + (newline ? A.h * 0.3 : 0);
+                    nvgBeginPath(vg);
+                    nvgRect(vg, float(A.x), float(A.y), float(std::max(w, 1.0)), float(A.h));
+                    nvgFillColor(vg, ui::rgb(ui::primary, 70));
+                    nvgFill(vg);
                 }
             }
-            const auto& span = L.lines[line];
-            size_t end = std::min(caret_, span.end);
-            double x = L.line_x[line] +
-                       text::measure(vg, text::Hand,
-                                     editing_->text.substr(span.begin, end - span.begin),
-                                     L.px);
-            double y = L.top + line * L.px * text::line_height;
-            nvgBeginPath(vg);
-            nvgRect(vg, float(x), float(y + L.px * 0.1), float(std::max(1.0, L.px / 16)),
-                    float(L.px * text::line_height * 0.85));
-            nvgFillColor(vg, accent);
-            nvgFill(vg);
+            CaretBox c = box(caret_);
+            if (vim_.mode == vim::Mode::Insert) {
+                if (std::fmod(now_ - caret_blink_start_, 1.0) < 0.6) {
+                    nvgBeginPath(vg);
+                    nvgRect(vg, float(c.x), float(c.y + c.h * 0.08),
+                            float(std::max(1.0, c.h / 20)), float(c.h * 0.84));
+                    nvgFillColor(vg, accent);
+                    nvgFill(vg);
+                }
+            } else {
+                size_t nx = caret_ < s.size() && s[caret_] != '\n' ? next_cp(s, caret_) : caret_;
+                double w = nx > caret_ ? box(nx).x - c.x : 0;
+                if (w <= 0) {
+                    w = c.h * 0.45;
+                }
+                nvgBeginPath(vg);
+                nvgRect(vg, float(c.x), float(c.y + c.h * 0.08), float(w), float(c.h * 0.84));
+                nvgFillColor(vg, ui::rgb(ui::primary, 110));
+                nvgFill(vg);
+            }
         }
     }
 
@@ -2658,7 +2542,7 @@ void App::draw_ui() {
         const char* key;
     };
     static const ToolDef tools[] = {
-        {Tool::Hand, ui::Icon::Hand, "Space"},       {Tool::Select, ui::Icon::Select, "1"},
+        {Tool::Hand, ui::Icon::Hand, "H"},       {Tool::Select, ui::Icon::Select, "1"},
         {Tool::Rect, ui::Icon::Rect, "2"},       {Tool::Diamond, ui::Icon::Diamond, "3"},
         {Tool::Ellipse, ui::Icon::Ellipse, "4"}, {Tool::Arrow, ui::Icon::Arrow, "5"},
         {Tool::Line, ui::Icon::Line, "6"},       {Tool::Draw, ui::Icon::Draw, "7"},
@@ -2786,7 +2670,17 @@ void App::draw_ui() {
     draw_search();
 
     // Hint, bottom right.
-    ui::label(vg, "Double-click or Enter dives in  ·  Esc zooms out  ·  hjkl select  ·  o write in nvim  ·  c code",
+    if (editing_) {
+        static const char* names[] = {"-- INSERT --", "-- NORMAL --", "-- VISUAL --",
+                                      "-- VISUAL LINE --"};
+        std::string mode = names[int(vim_.mode)];
+        if (!vim_.pending().empty()) {
+            mode += "   " + vim_.pending();
+        }
+        ui::label(vg, mode, win_w_ / 2.0, win_h_ - 28.0, 13, ui::rgb(ui::ink), true,
+                  NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    }
+    ui::label(vg, "Double-click or Enter dives in  ·  Esc zooms out  ·  ```py in a note makes a code block",
               win_w_ - 20.0, win_h_ - 36.0, 12, ui::rgb(0xadb5bd), false,
               NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 

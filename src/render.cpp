@@ -170,6 +170,51 @@ static void draw_code(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     nvgRestore(vg);
 }
 
+CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos) {
+    const std::string& s = n.text;
+    pos = std::min(pos, s.size());
+    if (n.kind == Kind::Code) {
+        Rect r = screen_rect(n, t);
+        double px = n.style.font_size * parent_scale(n, t);
+        size_t lb = pos == 0 ? std::string::npos : s.rfind('\n', pos - 1);
+        lb = lb == std::string::npos ? 0 : lb + 1;
+        size_t line = size_t(std::count(s.begin(), s.begin() + long(lb), '\n'));
+        double adv = text::measure(vg, text::Mono, "M", px);
+        size_t col = codepoints(expand_tabs(std::string_view(s).substr(lb, pos - lb)));
+        return {r.x + code_pad * px + col * adv, r.y + code_top * px + line * code_lh * px,
+                code_lh * px};
+    }
+    TextLayout L = layout_text(vg, n, t);
+    size_t line = 0;
+    for (size_t i = 0; i < L.lines.size(); ++i) {
+        if (L.lines[i].begin <= pos) {
+            line = i;
+        }
+    }
+    if (L.lines.empty()) {
+        return {L.line_x.empty() ? screen_rect(n, t).center().x : L.line_x[0], L.top,
+                L.px * text::line_height};
+    }
+    const auto& span = L.lines[line];
+    size_t end = std::min(pos, span.end);
+    double x = L.line_x[line] +
+               text::measure(vg, text::Hand, s.substr(span.begin, end - span.begin), L.px);
+    return {x, L.top + line * L.px * text::line_height, L.px * text::line_height};
+}
+
+std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t) {
+    if (n.kind != Kind::Code) {
+        return layout_text(vg, n, t).lines;
+    }
+    std::vector<text::Span> out;
+    size_t start = 0;
+    for_each_line(n.text, [&](std::string_view l) {
+        out.push_back({start, start + l.size()});
+        start += l.size() + 1;
+    });
+    return out;
+}
+
 static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     if (n.kind == Kind::Code) {
         return; // its text is the code itself

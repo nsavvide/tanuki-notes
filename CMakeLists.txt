@@ -46,6 +46,7 @@ add_executable(tanuki-notes
     src/store.cpp
     src/text.cpp
     src/ui.cpp
+    src/vim.cpp
 )
 target_link_libraries(tanuki-notes PRIVATE
     SDL3::SDL3 nanovg nlohmann_json::nlohmann_json OpenGL::GL

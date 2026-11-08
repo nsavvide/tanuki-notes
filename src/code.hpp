@@ -13,12 +13,13 @@ namespace code {
 
 struct Lang {
     const char* name; // stored in board.json and shown on the block
-    const char* ext;  // file extension for nvim (picks the filetype)
 };
 
 // Languages offered in the picker (the first is the default).
 const std::vector<Lang>& languages();
 const Lang& lang(std::string_view name); // unknown names fall back to "text"
+// Language for a Markdown fence tag ("py", "rs", "c++", ...).
+std::string from_fence(std::string_view tag);
 
 enum class Tok { Plain, Keyword, Type, String, Number, Comment, Function };
 

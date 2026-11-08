@@ -45,6 +45,14 @@ struct TextLayout {
 };
 TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t);
 
+// Where the caret sits for byte `pos` of the node's text (top-left, height).
+struct CaretBox {
+    double x, y, h;
+};
+CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos);
+// The node's text as it is laid out on screen, line by line.
+std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t);
+
 // Draws `node` and everything inside it that is visible.
 void draw_subtree(RenderCtx& ctx, const Node& node, Xform t);
 

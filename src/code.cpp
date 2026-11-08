@@ -123,11 +123,11 @@ bool ident_char(unsigned char c) { return std::isalnum(c) || c == '_' || c >= 0x
 
 const std::vector<Lang>& languages() {
     static const std::vector<Lang> all = {
-        {"cpp", "cpp"},     {"rust", "rs"},       {"python", "py"},
-        {"typescript", "ts"}, {"javascript", "js"}, {"go", "go"},
-        {"lua", "lua"},     {"bash", "sh"},       {"sql", "sql"},
-        {"json", "json"},   {"yaml", "yaml"},     {"c", "c"},
-        {"text", "txt"},
+        {"cpp"},     {"rust"},       {"python"},
+        {"typescript"}, {"javascript"}, {"go"},
+        {"lua"},     {"bash"},       {"sql"},
+        {"json"},   {"yaml"},     {"c"},
+        {"text"},
     };
     return all;
 }
@@ -139,6 +139,27 @@ const Lang& lang(std::string_view name) {
         }
     }
     return languages().back();
+}
+
+std::string from_fence(std::string_view tag) {
+    std::string t;
+    for (char ch : tag) {
+        if (ch != ' ' && ch != '\t') {
+            t += char(std::tolower((unsigned char)ch));
+        }
+    }
+    static const std::pair<const char*, const char*> alias[] = {
+        {"py", "python"}, {"rs", "rust"},   {"js", "javascript"}, {"jsx", "javascript"},
+        {"ts", "typescript"}, {"tsx", "typescript"}, {"sh", "bash"}, {"shell", "bash"},
+        {"zsh", "bash"}, {"c++", "cpp"},    {"cc", "cpp"},        {"cxx", "cpp"},
+        {"hpp", "cpp"},  {"h", "c"},        {"yml", "yaml"},      {"golang", "go"},
+        {"txt", "text"}, {"", "text"}};
+    for (auto [a, b] : alias) {
+        if (t == a) {
+            return b;
+        }
+    }
+    return lang(t).name;
 }
 
 std::vector<Token> highlight(std::string_view lang, std::string_view s,

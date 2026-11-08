@@ -4,6 +4,7 @@
 #include "geom.hpp"
 #include "node.hpp"
 #include "ui.hpp"
+#include "vim.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -99,18 +100,10 @@ class App {
     void bind_endpoints(Node& n);
     void update_bindings();
 
-    // Writing in real nvim (in a terminal window) and vim-style keys.
-    struct NvimEdit {
-        std::string id;
-        std::filesystem::path file;
-        std::filesystem::file_time_type mtime;
-        SDL_Process* proc; // nullptr in the self-test
-    };
-    void open_in_nvim(Node& n);
-    void poll_nvim();
-    void new_code_block(Vec2 at);
-    void select_dir(Vec2 dir);
     void edit_selected();
+    void refit_editing();
+    void open_code_block(const std::string& tag); // typed ```tag + Enter in a note
+    void close_code_block();                      // typed ``` + Enter in a code block
 
     // Search.
     void open_search();
@@ -197,6 +190,7 @@ class App {
     // Text editing.
     Node* editing_ = nullptr;
     size_t caret_ = 0;
+    vim::Editor vim_;
     double caret_blink_start_ = 0;
 
     // History.
@@ -217,7 +211,6 @@ class App {
     bool fly_content_ = false;
     bool flying_ = false;
 
-    std::vector<NvimEdit> nvim_edits_;
     std::string came_from_id_; // shape selected by zooming out of it
     std::string code_lang_ = "cpp";
 
