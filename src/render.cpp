@@ -18,6 +18,10 @@ std::vector<Vec2> screen_points(const Node& n, Xform t) {
     return out;
 }
 
+static double title_target(const Node& n) {
+    return !n.children.empty() || n.kind == Kind::Pdf ? 1 : 0;
+}
+
 TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
     TextLayout L;
     Rect r = screen_rect(n, t);
@@ -29,18 +33,20 @@ TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
         return L;
     }
     // Shape label: centered and wrapped, or a title in the top-left corner
-    // once the shape has children of its own.
-    bool title = !n.children.empty() || n.kind == Kind::Pdf;
+    // once the shape has children of its own. In between while it glides.
+    double k = n.title_k < 0 ? title_target(n) : n.title_k;
+    k = k * k * (3 - 2 * k); // ease in-out
     double pad = std::max(L.px * 0.5, r.w * 0.04);
-    double max_w = title ? r.w - 2 * pad : r.w * 0.8;
+    double max_w = k > 0 ? r.w - 2 * pad : r.w * 0.8;
     L.lines = text::wrap(vg, text::Hand, n.text, L.px, max_w);
     double block_h = L.lines.size() * L.px * text::line_height;
-    L.top = title ? r.y + pad * 0.6 : r.y + (r.h - block_h) / 2;
+    auto lerp = [k](double a, double b) { return a + (b - a) * k; };
+    L.top = lerp(r.y + (r.h - block_h) / 2, r.y + pad * 0.6);
     for (const auto& span : L.lines) {
         double w = text::measure(vg, text::Hand,
                                  n.text.substr(span.begin, span.end - span.begin),
                                  L.px);
-        L.line_x.push_back(title ? r.x + pad : r.x + (r.w - w) / 2);
+        L.line_x.push_back(lerp(r.x + (r.w - w) / 2, r.x + pad));
     }
     return L;
 }
@@ -66,6 +72,15 @@ void fit_text_bounds(NVGcontext* vg, Node& n) {
 }
 
 static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
+    double target = title_target(n);
+    if (n.title_k < 0) {
+        n.title_k = target;
+    } else if (n.title_k != target) {
+        double step = ctx.dt / 0.25; // full glide in a quarter second
+        n.title_k = target > n.title_k ? std::min(target, n.title_k + step)
+                                       : std::max(target, n.title_k - step);
+        ctx.animating = true;
+    }
     if (n.text.empty()) {
         return;
     }

@@ -1972,6 +1972,7 @@ void App::text_input(const char* utf8) {
 void App::update(double now, int win_w, int win_h) {
     double dt = last_frame_ > 0 ? std::min(now - last_frame_, 0.1) : 1 / 60.0;
     last_frame_ = now_ = now;
+    frame_dt_ = dt;
     win_w_ = win_w;
     win_h_ = win_h;
 
@@ -2002,11 +2003,13 @@ void App::render(float pixel_ratio) {
     nvgBeginFrame(vg_, float(win_w_), float(win_h_), pixel_ratio);
 
     RenderCtx ctx{vg_, assets_, {0, 0, double(win_w_), double(win_h_)}, pixel_ratio, {}};
+    ctx.dt = frame_dt_;
     for (Node* n : erasing_) {
         ctx.faded.insert(n);
     }
     auto [n, t] = draw_root();
     draw_subtree(ctx, *n, t);
+    labels_moving_ = ctx.animating;
 
     draw_overlay();
     draw_ui();

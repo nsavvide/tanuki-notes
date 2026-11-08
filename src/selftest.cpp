@@ -292,10 +292,24 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             type(app, "Box");
             app.key_down(SDLK_ESCAPE, {});
             click(app, {1200, 750});
+            tick(app);
+            app.render(1); // label drawn centered
+            CHECK(box->title_k == 0);
             app.set_tool(Tool::Rect);
             drag(app, {350, 300}, {450, 380});
             CHECK(box->children.size() == 1);
             click(app, {1200, 750});
+
+            // The label glides to the top-left instead of jumping.
+            tick(app);
+            app.render(1);
+            CHECK(box->title_k > 0 && box->title_k < 1);
+            CHECK(app.busy());
+            for (int i = 0; i < 30; ++i) {
+                tick(app);
+                app.render(1);
+            }
+            CHECK(box->title_k == 1);
 
             auto width = [&] { return app.screen_rect_of(box)->w; };
             click(app, {150, 350}, 2); // inside, away from title and child

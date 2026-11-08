@@ -48,7 +48,7 @@ class App {
 
     // True while something animates or waits (so the loop keeps drawing).
     bool busy() const {
-        return flying_ || editing_ || search_open_ || drag_ != Drag::None || dirty_ ||
+        return flying_ || editing_ || search_open_ || labels_moving_ || drag_ != Drag::None || dirty_ ||
                assets_.busy() || now_ < toast_until_;
     }
 
@@ -156,7 +156,8 @@ class App {
     Camera cam_;
     int win_w_ = 1280, win_h_ = 800;
     float pixel_ratio_ = 1;
-    double now_ = 0, last_frame_ = 0;
+    double now_ = 0, last_frame_ = 0, frame_dt_ = 1 / 60.0;
+    bool labels_moving_ = false;
     Vec2 mouse_;
 
     Tool tool_ = Tool::Select;

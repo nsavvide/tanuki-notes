@@ -48,6 +48,10 @@ struct Node {
     std::string end_bind;     // attached to, and the end
     uint32_t seed = 1;        // keeps the hand-drawn wobble stable
 
+    // Runtime only: 0 = label centered, 1 = label is the top-left title.
+    // Animated by the renderer when the shape gains or loses contents.
+    mutable double title_k = -1; // -1: not drawn yet, snap to target
+
     Node* parent = nullptr;
     std::vector<std::unique_ptr<Node>> children;
 

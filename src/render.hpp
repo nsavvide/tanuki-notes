@@ -16,6 +16,8 @@ struct RenderCtx {
     Rect viewport;
     float pixel_ratio = 1;
     std::set<const Node*> faded; // e.g. nodes under the eraser
+    double dt = 1 / 60.0;        // seconds since the last frame
+    bool animating = false;      // out: a label is still moving
 };
 
 // Parent placement + child's fractions -> child placement.
