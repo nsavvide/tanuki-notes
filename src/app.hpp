@@ -99,6 +99,19 @@ class App {
     void bind_endpoints(Node& n);
     void update_bindings();
 
+    // Writing in real nvim (in a terminal window) and vim-style keys.
+    struct NvimEdit {
+        std::string id;
+        std::filesystem::path file;
+        std::filesystem::file_time_type mtime;
+        SDL_Process* proc; // nullptr in the self-test
+    };
+    void open_in_nvim(Node& n);
+    void poll_nvim();
+    void new_code_block(Vec2 at);
+    void select_dir(Vec2 dir);
+    void edit_selected();
+
     // Search.
     void open_search();
     void close_search();
@@ -203,6 +216,10 @@ class App {
     std::string fly_id_;
     bool fly_content_ = false;
     bool flying_ = false;
+
+    std::vector<NvimEdit> nvim_edits_;
+    std::string came_from_id_; // shape selected by zooming out of it
+    std::string code_lang_ = "cpp";
 
     bool search_open_ = false;
     std::string search_query_;

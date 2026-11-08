@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "code.hpp"
 #include "render.hpp"
 #include "rough.hpp"
 #include "store.hpp"
@@ -8,6 +9,9 @@
 #include <nlohmann/json.hpp>
 
 #include <cmath>
+#include <fstream>
+#include <sstream>
+#include <unistd.h>
 #include <format>
 #include <map>
 #include <unordered_map>
@@ -202,7 +206,19 @@ App::App(NVGcontext* vg, SDL_Window* window, fs::path map_dir)
     history_pos_ = 0;
 }
 
-App::~App() { flush(); }
+App::~App() {
+    poll_nvim();
+    flush();
+    for (auto& e : nvim_edits_) {
+        if (e.proc) {
+            SDL_DestroyProcess(e.proc); // nvim stays open; it's the user's
+        }
+    }
+    if (!nvim_edits_.empty()) {
+        std::error_code ec;
+        fs::remove_all(nvim_edits_[0].file.parent_path(), ec);
+    }
+}
 
 void App::flush() {
     try {
@@ -991,6 +1007,212 @@ void App::insert_file(const std::string& path, Vec2 center) {
     commit();
 }
 
+// ---------------------------------------------------------------- nvim + vim keys
+
+namespace {
+
+std::string which(const std::string& exe) {
+    const char* env = std::getenv("PATH");
+    std::string path = env ? env : "";
+    size_t start = 0;
+    while (true) {
+        size_t colon = path.find(':', start);
+        std::string dir = path.substr(start, colon - start);
+        fs::path f = fs::path(dir) / exe;
+        if (!dir.empty() && access(f.c_str(), X_OK) == 0) {
+            return f.string();
+        }
+        if (colon == std::string::npos) {
+            return "";
+        }
+        start = colon + 1;
+    }
+}
+
+// Command that opens a terminal window running `nvim file`.
+std::vector<std::string> nvim_command(const std::string& file) {
+    if (const char* t = std::getenv("TERMINAL"); t && *t) {
+        return {t, "-e", "nvim", file};
+    }
+    struct Term {
+        const char* exe;
+        std::vector<std::string> args;
+    };
+    static const Term known[] = {{"kitty", {"--title", "tanuki"}},
+                                 {"ghostty", {"-e"}},
+                                 {"foot", {}},
+                                 {"alacritty", {"-e"}},
+                                 {"wezterm", {"start", "--"}}};
+    for (const Term& t : known) {
+        if (!which(t.exe).empty()) {
+            std::vector<std::string> cmd{t.exe};
+            cmd.insert(cmd.end(), t.args.begin(), t.args.end());
+            cmd.insert(cmd.end(), {"nvim", file});
+            return cmd;
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+void App::open_in_nvim(Node& n) {
+    finish_text_edit();
+    for (auto it = nvim_edits_.begin(); it != nvim_edits_.end(); ++it) {
+        if (it->id == n.id) {
+            if (it->proc && !SDL_WaitProcess(it->proc, false, nullptr)) {
+                toast("Already open in nvim");
+                return;
+            }
+            poll_nvim(); // picks up its last save and drops it
+            break;
+        }
+    }
+    fs::path dir = fs::temp_directory_path() / ("tanuki-" + std::to_string(getpid()));
+    fs::create_directories(dir);
+    bool is_code = n.kind == Kind::Code;
+    fs::path file = dir / std::format("{}-{}.{}", is_code ? "code" : "note", n.id,
+                                      is_code ? code::lang(n.lang).ext : "md");
+    {
+        std::ofstream out(file, std::ios::binary);
+        out << n.text << (n.text.empty() ? "" : "\n");
+    }
+    auto cmd = nvim_command(file.string());
+    std::vector<const char*> argv;
+    for (const auto& a : cmd) {
+        argv.push_back(a.c_str());
+    }
+    argv.push_back(nullptr);
+    SDL_Process* proc = cmd.empty() ? nullptr : SDL_CreateProcess(argv.data(), false);
+    if (!proc) {
+        toast("No terminal found for nvim (set $TERMINAL)");
+        fs::remove(file);
+        return;
+    }
+    nvim_edits_.push_back({n.id, file, fs::last_write_time(file), proc});
+}
+
+// Each save in nvim (:w) lands in the map; closing nvim ends the session.
+void App::poll_nvim() {
+    for (auto it = nvim_edits_.begin(); it != nvim_edits_.end();) {
+        bool running = it->proc && !SDL_WaitProcess(it->proc, false, nullptr);
+        Node* n = find_by_id(*root_, it->id);
+        std::error_code ec;
+        auto mtime = fs::last_write_time(it->file, ec);
+        if (n && !ec && mtime != it->mtime) {
+            it->mtime = mtime;
+            std::ifstream in(it->file, std::ios::binary);
+            std::stringstream ss;
+            ss << in.rdbuf();
+            std::string s = ss.str();
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
+                s.pop_back();
+            }
+            if (s != n->text) {
+                n->text = std::move(s);
+                if (n->kind == Kind::Text) {
+                    fit_text_bounds(vg_, *n);
+                } else if (n->kind == Kind::Code) {
+                    fit_code_bounds(vg_, *n);
+                }
+                commit();
+            }
+        }
+        if (!n || !running) {
+            if (it->proc) {
+                SDL_DestroyProcess(it->proc);
+            }
+            fs::remove(it->file, ec);
+            it = nvim_edits_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void App::new_code_block(Vec2 at) {
+    Node* parent = container_at(at, nullptr);
+    auto tp = xform_of(parent);
+    if (!tp) {
+        return;
+    }
+    auto n = make_node(Kind::Code);
+    n->lang = code_lang_;
+    n->style = style_;
+    n->style.font_size = font_px_ * 0.8 / tp->s;
+    fit_code_bounds(vg_, *n);
+    Vec2 q = tp->to_local(at);
+    n->x = q.x - n->w / 2;
+    n->y = q.y - n->h / 2;
+    Node& added = add_child(*parent, std::move(n));
+    selection_ = {&added};
+    commit();
+    open_in_nvim(added);
+}
+
+void App::edit_selected() {
+    if (selection_.size() != 1) {
+        return;
+    }
+    Node& n = *selection_[0];
+    if (n.kind == Kind::Code) {
+        open_in_nvim(n);
+    } else if (n.kind == Kind::Text || n.kind == Kind::Rect ||
+               n.kind == Kind::Ellipse || n.kind == Kind::Diamond) {
+        start_text_edit(n);
+    }
+}
+
+// hjkl: select the nearest sibling in that direction (or, with nothing
+// selected, the shape nearest the middle of the screen).
+void App::select_dir(Vec2 d) {
+    Rect screen{0, 0, double(win_w_), double(win_h_)};
+    Node* cur = selection_.size() == 1 ? selection_[0] : nullptr;
+    Node* world = cur ? cur->parent : container_at(screen.center(), nullptr);
+    if (!world) {
+        return;
+    }
+    Vec2 from = screen.center();
+    if (cur) {
+        if (auto r = screen_rect_of(cur)) {
+            from = r->center();
+        }
+    }
+    Node* best = nullptr;
+    double best_score = 1e300;
+    for (auto& c : world->children) {
+        if (c.get() == cur || c->kind == Kind::Line || c->kind == Kind::Arrow ||
+            c->kind == Kind::Draw || c->kind == Kind::PdfPage) {
+            continue;
+        }
+        auto r = screen_rect_of(c.get());
+        if (!r) {
+            continue;
+        }
+        Vec2 v = r->center() - from;
+        double along = v.x * d.x + v.y * d.y;
+        double across = std::abs(v.x * d.y - v.y * d.x);
+        if (cur && along <= 1) {
+            continue;
+        }
+        // Without a selection, any direction goes: start near the middle.
+        double score = cur ? along + 2 * across : length(v);
+        if (score < best_score) {
+            best_score = score;
+            best = c.get();
+        }
+    }
+    if (!best) {
+        return;
+    }
+    selection_ = {best};
+    // Keep it on screen.
+    if (auto r = screen_rect_of(best); r && !screen.expanded(-24).contains(r->center())) {
+        flying_ = false;
+        cam_.pan(screen.center().x - r->center().x, screen.center().y - r->center().y);
+    }
+}
+
 // ---------------------------------------------------------------- navigation
 
 void App::fly_to(const Node* n) {
@@ -1006,11 +1228,25 @@ void App::fly_to_content() {
 }
 
 void App::fly_out() {
-    if (anchor_ == root_.get()) {
-        fly_to_content();
-    } else {
-        fly_to(anchor_);
+    // The shape we're "in": the deepest one under the middle of the screen
+    // that fills most of it.
+    Vec2 mid{win_w_ / 2.0, win_h_ / 2.0};
+    Node* world = container_at(mid, nullptr);
+    while (world->parent) {
+        auto r = screen_rect_of(world);
+        if (r && (r->w >= win_w_ * 0.6 || r->h >= win_h_ * 0.6)) {
+            break;
+        }
+        world = world->parent;
     }
+    if (!world->parent) {
+        fly_to_content();
+        return;
+    }
+    fly_to(world->parent);
+    // Select the shape we left, so hjkl and Enter carry on from it.
+    selection_ = {world};
+    came_from_id_ = world->id;
 }
 
 void App::step_fly(double dt) {
@@ -1424,6 +1660,10 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
             start_text_edit(*hit);
             return;
         }
+        if (hit && hit->kind == Kind::Code) {
+            open_in_nvim(*hit);
+            return;
+        }
         if (hit && !hit->is_container()) {
             return; // lines, drawings, images
         }
@@ -1534,7 +1774,7 @@ void App::mouse_move(Vec2 p, Mods m) {
         double l = o.x + (L ? dd.x : 0), r = o.right() + (R ? dd.x : 0);
         double t = o.y + (T ? dd.y : 0), b = o.bottom() + (B ? dd.y : 0);
         bool keep = m.shift || n->kind == Kind::Text || n->kind == Kind::Image ||
-                    n->kind == Kind::Pdf;
+                    n->kind == Kind::Pdf || n->kind == Kind::Code;
         if (keep) {
             double sx = (r - l) / o.w, sy = (b - t) / o.h;
             double k = (L || R) && (T || B) ? std::max(sx, sy) : (L || R) ? sx : sy;
@@ -1552,7 +1792,7 @@ void App::mouse_move(Vec2 p, Mods m) {
         n->y = (nr.y - tp->oy) / tp->s;
         n->w = nr.w / tp->s;
         n->h = nr.h / tp->s;
-        if (n->kind == Kind::Text) {
+        if (n->kind == Kind::Text || n->kind == Kind::Code) {
             n->style.font_size = resize_orig_font_ * nr.h / o.h;
         }
         moved_ = true;
@@ -1841,6 +2081,7 @@ void App::key_down(SDL_Keycode key, Mods m) {
             m.shift ? redo() : undo();
             return;
         case SDLK_Y:
+        case SDLK_R:
             redo();
             return;
         case SDLK_A:
@@ -1884,12 +2125,13 @@ void App::key_down(SDL_Keycode key, Mods m) {
             detach(*creating_);
             creating_ = nullptr;
             drag_ = Drag::None;
-        } else if (!selection_.empty()) {
-            selection_.clear();
         } else if (tool_ != Tool::Select) {
             tool_ = Tool::Select;
+        } else if (!selection_.empty() &&
+                   !(selection_.size() == 1 && selection_[0]->id == came_from_id_)) {
+            selection_.clear();
         } else {
-            fly_out();
+            fly_out(); // repeated Esc keeps going out, level by level
         }
         return;
     case SDLK_RETURN:
@@ -1898,13 +2140,20 @@ void App::key_down(SDL_Keycode key, Mods m) {
             Node* n = selection_[0];
             if (n->is_container()) {
                 fly_to(n); // dive in
-            } else if (n->kind == Kind::Text) {
-                start_text_edit(*n);
+            } else {
+                edit_selected();
             }
         }
         return;
-    case SDLK_DELETE:
     case SDLK_BACKSPACE:
+        if (selection_.empty() ||
+            (selection_.size() == 1 && selection_[0]->id == came_from_id_)) {
+            fly_out();
+            return;
+        }
+        [[fallthrough]];
+    case SDLK_DELETE:
+    case SDLK_X:
         delete_selection();
         return;
     case SDLK_LEFT: nudge(m.shift ? -10 : -1, 0); return;
@@ -1917,16 +2166,71 @@ void App::key_down(SDL_Keycode key, Mods m) {
     case SDLK_SLASH:
         open_search();
         return;
-    case SDLK_H: set_tool(Tool::Hand); return;
-    case SDLK_V: set_tool(Tool::Select); return;
-    case SDLK_R: set_tool(Tool::Rect); return;
-    case SDLK_D: set_tool(Tool::Diamond); return;
-    case SDLK_O: set_tool(Tool::Ellipse); return;
-    case SDLK_A: set_tool(Tool::Arrow); return;
-    case SDLK_L: set_tool(Tool::Line); return;
-    case SDLK_P: set_tool(Tool::Draw); return;
-    case SDLK_T: set_tool(Tool::Text); return;
-    case SDLK_E: set_tool(Tool::Eraser); return;
+    // Vim keys: hjkl select the next shape that way (Shift moves it),
+    // i edits in place, o writes in nvim, c adds a code block,
+    // y/p copy/paste, u undo (Ctrl+R redo), x delete.
+    case SDLK_H:
+    case SDLK_J:
+    case SDLK_K:
+    case SDLK_L: {
+        Vec2 d = key == SDLK_H ? Vec2{-1, 0}
+                 : key == SDLK_J ? Vec2{0, 1}
+                 : key == SDLK_K ? Vec2{0, -1}
+                                 : Vec2{1, 0};
+        if (m.shift) {
+            nudge(d.x * 10, d.y * 10);
+        } else {
+            select_dir(d);
+        }
+        return;
+    }
+    case SDLK_I:
+        edit_selected();
+        return;
+    case SDLK_O:
+        if (selection_.size() == 1) {
+            Node* n = selection_[0];
+            if (n->kind == Kind::Text || n->kind == Kind::Code ||
+                n->kind == Kind::Rect || n->kind == Kind::Ellipse ||
+                n->kind == Kind::Diamond) {
+                open_in_nvim(*n);
+            }
+        } else if (selection_.empty()) {
+            // A new note, written in nvim.
+            Vec2 at = Rect{0, 0, double(win_w_), double(win_h_)}.contains(mouse_)
+                          ? mouse_
+                          : Vec2{win_w_ / 2.0, win_h_ / 2.0};
+            Node* parent = container_at(at, nullptr);
+            auto tp = xform_of(parent);
+            if (!tp) {
+                return;
+            }
+            auto n = make_node(Kind::Text);
+            n->style = style_;
+            n->style.font_size = font_px_ / tp->s;
+            Vec2 q = tp->to_local(at);
+            n->x = q.x;
+            n->y = q.y;
+            fit_text_bounds(vg_, *n);
+            Node& added = add_child(*parent, std::move(n));
+            selection_ = {&added};
+            open_in_nvim(added);
+        }
+        return;
+    case SDLK_C:
+        new_code_block(Rect{0, 0, double(win_w_), double(win_h_)}.contains(mouse_)
+                           ? mouse_
+                           : Vec2{win_w_ / 2.0, win_h_ / 2.0});
+        return;
+    case SDLK_Y:
+        copy_selection();
+        return;
+    case SDLK_P:
+        paste(mouse_);
+        return;
+    case SDLK_U:
+        undo();
+        return;
     case SDLK_1:
         if (m.shift) {
             fly_to_content();
@@ -1985,6 +2289,7 @@ void App::update(double now, int win_w, int win_h) {
         insert_file(files[i], {win_w_ / 2.0 + 24.0 * i, win_h_ / 2.0 + 24.0 * i});
     }
 
+    poll_nvim();
     step_fly(dt);
     clamp_zoom();
     reroot();
@@ -2187,6 +2492,35 @@ bool App::style_panel_visible() const {
 
 void App::draw_style_panel() {
     NVGcontext* vg = vg_;
+    if (!selection_.empty() && selection_[0]->kind == Kind::Code) {
+        const auto& langs = code::languages();
+        int cols = 3;
+        int rows = int(langs.size() + cols - 1) / cols;
+        double x = 16, y = 72, w = 204, h = 12 + 18 + rows * 30 + 8;
+        ui::island(vg, {x, y, w, h});
+        add_hit({x, y, w, h}, nullptr);
+        ui::label(vg, "Language", x + 12, y + 18, 11.5f, ui::rgb(0x495057));
+        for (size_t i = 0; i < langs.size(); ++i) {
+            Rect r{x + 12 + double(i % cols) * 61, y + 30 + double(i / cols) * 30, 57, 26};
+            std::string name = langs[i].name;
+            bool active = selection_[0]->lang == name ||
+                          (selection_[0]->lang.empty() && name == "text");
+            ui::button_bg(vg, r, active, r.contains(mouse_));
+            ui::label(vg, name == "javascript" ? "js" : name == "typescript" ? "ts" : name,
+                      r.center().x, r.center().y, 12, ui::rgb(active ? ui::primary : ui::ink),
+                      false, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            add_hit(r, [this, name] {
+                code_lang_ = name;
+                for (Node* n : selection_) {
+                    if (n->kind == Kind::Code) {
+                        n->lang = name;
+                    }
+                }
+                commit();
+            });
+        }
+        return;
+    }
     // Values shown: the first selected node, or the style for new shapes.
     Node* first = selection_.empty() ? nullptr : selection_[0];
     uint32_t stroke = first ? first->style.stroke : style_.stroke;
@@ -2324,7 +2658,7 @@ void App::draw_ui() {
         const char* key;
     };
     static const ToolDef tools[] = {
-        {Tool::Hand, ui::Icon::Hand, "H"},       {Tool::Select, ui::Icon::Select, "1"},
+        {Tool::Hand, ui::Icon::Hand, "Space"},       {Tool::Select, ui::Icon::Select, "1"},
         {Tool::Rect, ui::Icon::Rect, "2"},       {Tool::Diamond, ui::Icon::Diamond, "3"},
         {Tool::Ellipse, ui::Icon::Ellipse, "4"}, {Tool::Arrow, ui::Icon::Arrow, "5"},
         {Tool::Line, ui::Icon::Line, "6"},       {Tool::Draw, ui::Icon::Draw, "7"},
@@ -2452,7 +2786,7 @@ void App::draw_ui() {
     draw_search();
 
     // Hint, bottom right.
-    ui::label(vg, "Double-click a shape to dive in  ·  Esc zooms out  ·  Ctrl+F search",
+    ui::label(vg, "Double-click or Enter dives in  ·  Esc zooms out  ·  hjkl select  ·  o write in nvim  ·  c code",
               win_w_ - 20.0, win_h_ - 36.0, 12, ui::rgb(0xadb5bd), false,
               NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 

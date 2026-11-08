@@ -38,6 +38,7 @@ add_executable(tanuki-notes
     src/main.cpp
     src/app.cpp
     src/assets.cpp
+    src/code.cpp
     src/node.cpp
     src/render.cpp
     src/rough.cpp
@@ -58,5 +59,6 @@ target_link_options(tanuki-notes PRIVATE
 set_property(SOURCE src/text.cpp APPEND PROPERTY OBJECT_DEPENDS
     ${CMAKE_SOURCE_DIR}/assets/fonts/Virgil.ttf
     ${CMAKE_SOURCE_DIR}/assets/fonts/Inter-Regular.ttf
-    ${CMAKE_SOURCE_DIR}/assets/fonts/Inter-Medium.ttf)
+    ${CMAKE_SOURCE_DIR}/assets/fonts/Inter-Medium.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/JetBrainsMono-Regular.ttf)
 install(TARGETS tanuki-notes)

@@ -1,8 +1,13 @@
 #include "render.hpp"
+
+#include "code.hpp"
 #include "assets.hpp"
 #include "rough.hpp"
 
 #include <nanovg.h>
+
+#include <algorithm>
+#include <string_view>
 
 static NVGcolor color(uint32_t c, float alpha = 1) {
     return nvgRGBA((c >> 24) & 0xff, (c >> 16) & 0xff, (c >> 8) & 0xff,
@@ -71,7 +76,104 @@ void fit_text_bounds(NVGcontext* vg, Node& n) {
     n.h = lines * fs * text::line_height;
 }
 
+// Code card layout, in multiples of the font size.
+constexpr double code_pad = 0.9, code_top = 1.9, code_lh = 1.45;
+
+static std::string expand_tabs(std::string_view line) {
+    std::string out;
+    for (char c : line) {
+        if (c == '\t') {
+            out.append(4 - out.size() % 4, ' ');
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+static size_t codepoints(std::string_view s) {
+    return size_t(std::count_if(s.begin(), s.end(),
+                                [](char c) { return (c & 0xc0) != 0x80; }));
+}
+
+template <class F> static void for_each_line(const std::string& s, F f) {
+    size_t start = 0;
+    while (true) {
+        size_t nl = s.find('\n', start);
+        f(std::string_view(s).substr(start, nl - start));
+        if (nl == std::string::npos) {
+            return;
+        }
+        start = nl + 1;
+    }
+}
+
+void fit_code_bounds(NVGcontext* vg, Node& n) {
+    double fs = n.style.font_size;
+    double adv = text::measure(vg, text::Mono, "M", fs);
+    size_t cols = 24, lines = 0;
+    for_each_line(n.text, [&](std::string_view l) {
+        cols = std::max(cols, codepoints(expand_tabs(l)) + 1);
+        ++lines;
+    });
+    lines = std::max<size_t>(lines, 3);
+    n.w = cols * adv + 2 * code_pad * fs;
+    n.h = lines * code_lh * fs + (code_top + code_pad) * fs;
+}
+
+static void draw_code(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
+    NVGcontext* vg = ctx.vg;
+    Rect r = screen_rect(n, t);
+    double px = n.style.font_size * parent_scale(n, t);
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, float(r.x), float(r.y), float(r.w), float(r.h),
+                   float(std::min(px * 0.6, r.w * 0.05)));
+    nvgFillColor(vg, color((code::background << 8) | 0xff, alpha));
+    nvgFill(vg);
+    if (px < 1) {
+        return;
+    }
+    nvgSave(vg);
+    nvgIntersectScissor(vg, float(r.x), float(r.y), float(r.w), float(r.h));
+
+    const code::Lang& lang = code::lang(n.lang);
+    double small = px * 0.75;
+    text::draw_line(vg, text::Mono, lang.name,
+                    r.right() - code_pad * px -
+                        text::measure(vg, text::Mono, lang.name, small),
+                    r.y + 0.5 * px, small,
+                    color((code::muted << 8) | 0xff, alpha), ctx.viewport);
+
+    double adv = text::measure(vg, text::Mono, "M", px);
+    double lh = code_lh * px;
+    double y = r.y + code_top * px;
+    bool in_block = false;
+    for_each_line(n.text, [&](std::string_view raw) {
+        if (y > ctx.viewport.bottom()) {
+            return; // ponytail: keeps lexing lines below the screen; cheap enough
+        }
+        std::string line = expand_tabs(raw);
+        auto toks = code::highlight(lang.name, line, in_block);
+        if (y + lh >= ctx.viewport.y) {
+            double x = r.x + code_pad * px;
+            for (const auto& tk : toks) {
+                std::string_view s = std::string_view(line).substr(tk.begin, tk.end - tk.begin);
+                text::draw_line(vg, text::Mono, std::string(s), x,
+                                y + (code_lh - text::line_height) / 2 * px, px,
+                                color((code::color(tk.kind) << 8) | 0xff, alpha),
+                                ctx.viewport);
+                x += codepoints(s) * adv;
+            }
+        }
+        y += lh;
+    });
+    nvgRestore(vg);
+}
+
 static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
+    if (n.kind == Kind::Code) {
+        return; // its text is the code itself
+    }
     double target = title_target(n);
     if (n.title_k < 0) {
         n.title_k = target;
@@ -270,6 +372,9 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         nvgStroke(vg);
         break;
     }
+    case Kind::Code:
+        draw_code(ctx, n, t, alpha);
+        break;
     case Kind::Text:
     case Kind::Root:
         break;

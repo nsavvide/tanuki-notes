@@ -5,11 +5,13 @@
 // `tanuki-notes --make-demo <dir>`: builds a small example map.
 
 #include "app.hpp"
+#include "code.hpp"
 #include "render.hpp"
 #include "store.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <print>
 #include <unistd.h>
@@ -56,6 +58,8 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
     fs::path dir = fs::temp_directory_path() /
                    ("tanuki-selftest-" + std::to_string(getpid()));
     fs::remove_all(dir);
+    // "Terminal" that exits at once: the tests never open real nvim windows.
+    setenv("TERMINAL", "true", 1);
     {
         App app(vg, window, dir);
         tick(app);
@@ -324,6 +328,78 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
                 tick(app);
             }
             CHECK(width() < 700);
+        }
+        fs::remove_all(d);
+    }
+
+    // Code blocks, nvim sync and vim keys.
+    {
+        bool block = false;
+        auto toks = code::highlight("rust", "let x = \"hi\"; // note", block);
+        CHECK(toks.front().kind == code::Tok::Keyword);
+        CHECK(toks.back().kind == code::Tok::Comment);
+        CHECK(std::ranges::any_of(toks, [](auto& t) { return t.kind == code::Tok::String; }));
+        code::highlight("cpp", "int a; /* open", block);
+        CHECK(block);
+        CHECK(code::highlight("cpp", "still */ b", block).front().kind == code::Tok::Comment);
+        CHECK(!block);
+
+        fs::path d = dir;
+        d += "-vim";
+        fs::remove_all(d);
+        {
+            App app(vg, window, d);
+            tick(app);
+            app.mouse_move({640, 400}, {});
+            app.key_down(SDLK_C, {});
+            CHECK(app.root().children.size() == 1);
+            Node* code = app.root().children[0].get();
+            CHECK(code->kind == Kind::Code && code->lang == "cpp");
+
+            // A save in nvim: the file changes, the next frame picks it up.
+            fs::path f = d / "edit.cpp";
+            std::ofstream(f) << "int main() {\n    return 0;\n}\n";
+            app.nvim_edits_.push_back({code->id, f, fs::file_time_type::min(), nullptr});
+            double w0 = code->w;
+            tick(app);
+            CHECK(code->text == "int main() {\n    return 0;\n}");
+            CHECK(code->w >= w0);
+            CHECK(std::ranges::none_of(app.nvim_edits_, // no process: session ends
+                                       [&](auto& e) { return e.file == f; }));
+            for (int i = 0; i < 3; ++i) {
+                tick(app);
+                app.render(1);
+            }
+
+            // hjkl walk between three boxes in a row.
+            click(app, {1200, 750});
+            for (double x : {100.0, 400.0, 700.0}) {
+                app.set_tool(Tool::Rect);
+                drag(app, {x, 600}, {x + 150, 700});
+            }
+            Node* b0 = app.root().children[1].get();
+            Node* b1 = app.root().children[2].get();
+            Node* b2 = app.root().children[3].get();
+            app.selection_ = {b0};
+            app.key_down(SDLK_L, {});
+            CHECK(app.selection_.size() == 1 && app.selection_[0] == b1);
+            app.key_down(SDLK_L, {});
+            CHECK(app.selection_[0] == b2);
+            app.key_down(SDLK_H, {});
+            CHECK(app.selection_[0] == b1);
+            app.key_down(SDLK_K, {}); // the code block is above
+            CHECK(app.selection_[0] == code);
+
+            // Enter dives in, Esc comes back out with the box selected.
+            app.selection_ = {b1};
+            app.key_down(SDLK_RETURN, {});
+            for (int i = 0; i < 120; ++i) {
+                tick(app);
+            }
+            CHECK(app.screen_rect_of(b1)->w > 800);
+            app.selection_.clear();
+            app.key_down(SDLK_ESCAPE, {});
+            CHECK(app.selection_.size() == 1 && app.selection_[0] == b1);
         }
         fs::remove_all(d);
     }

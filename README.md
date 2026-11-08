@@ -28,7 +28,9 @@ The fonts are compiled into the binary, so after `install` you can run
 | Zoom | scroll wheel, pinch |
 | Pan | middle-drag, space + drag, hand tool, shift + scroll |
 | Dive into a shape | double-click inside it (not on its label), Enter, or mouse forward button |
-| Zoom out one level | Esc (with nothing selected), mouse back button, or click the level badge |
+| Zoom out one level | Esc or Backspace (with nothing selected), mouse back button, or the level badge; the shape you left stays selected, so Esc again keeps going out |
+| Write in nvim | `o` on a selected note/shape/code block (or `o` on nothing for a new note): opens nvim in a terminal, every `:w` updates the map |
+| Code block | `c`, then write it in nvim; pick the language in the left panel |
 | Fit everything | Home or Shift+1 |
 | Jump to a parent | click it in the breadcrumb (top left) |
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
@@ -40,12 +42,20 @@ The fonts are compiled into the binary, so after `install` you can run
 | Move into / out of a shape | drag it inside or outside another shape |
 | Save + git commit | Ctrl+S or the Commit button |
 
-Tools: H hand, V/1 select, R/2 rectangle, D/3 diamond, O/4 ellipse,
-A/5 arrow, L/6 line, P/7 pen, T/8 text, 9 image/PDF, E/0 eraser.
+Tools: 1 select, 2 rectangle, 3 diamond, 4 ellipse, 5 arrow, 6 line,
+7 pen, 8 text, 9 image/PDF, 0 eraser; hold Space to pan.
+
+Vim keys: h/j/k/l select the nearest shape that way (Shift+hjkl moves it
+10 px), i edit in place, o write in nvim, c new code block, y copy,
+p paste, x delete, u undo, Ctrl+R redo.
 
 Editing: Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+C/X/V, Ctrl+D duplicate,
 Ctrl+A select all, Delete, arrow keys nudge (Shift = 10 px),
 Ctrl+] / Ctrl+[ bring to front / send to back.
+
+nvim opens in `$TERMINAL`, else the first of kitty, ghostty, foot,
+alacritty or wezterm. Notes open as Markdown, code blocks with their
+language's extension, so your nvim config (LSP, treesitter) applies.
 
 ## The map folder (git-friendly)
 
@@ -77,5 +87,6 @@ so there is no precision limit. See `App::reroot` in `src/app.cpp`.
 
 ## Licenses
 
-Fonts in `assets/fonts`: Virgil (Excalidraw's hand-drawn font) and Inter,
-both under the SIL Open Font License; see the license files next to them.
+Fonts in `assets/fonts`: Virgil (Excalidraw's hand-drawn font), Inter and
+JetBrains Mono, all under the SIL Open Font License; see the license files
+next to them.

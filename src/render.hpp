@@ -50,3 +50,5 @@ void draw_subtree(RenderCtx& ctx, const Node& node, Xform t);
 
 // Text node size (in parent units) from its content and font size.
 void fit_text_bounds(NVGcontext* vg, Node& n);
+// Same for a Code node: the card grows to fit its longest line.
+void fit_code_bounds(NVGcontext* vg, Node& n);

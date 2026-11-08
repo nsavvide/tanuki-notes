@@ -24,14 +24,17 @@ const unsigned char inter_ttf[] = {
 const unsigned char inter_medium_ttf[] = {
 #embed "../assets/fonts/Inter-Medium.ttf"
 };
+const unsigned char mono_ttf[] = {
+#embed "../assets/fonts/JetBrainsMono-Regular.ttf"
+};
 
 struct VecFont {
     stbtt_fontinfo info{};
     double ascent = 0; // per px of font size
 };
 
-int nvg_font[3] = {-1, -1, -1};
-VecFont vec_font[3];
+int nvg_font[4] = {-1, -1, -1, -1};
+VecFont vec_font[4];
 
 bool load(VecFont& f, const unsigned char* data) {
     if (!stbtt_InitFont(&f.info, data, stbtt_GetFontOffsetForIndex(data, 0))) {
@@ -152,10 +155,11 @@ bool init(NVGcontext* vg) {
         const char* name;
         const unsigned char* data;
         int size;
-    } fonts[3] = {{"hand", virgil_ttf, sizeof virgil_ttf},
+    } fonts[4] = {{"hand", virgil_ttf, sizeof virgil_ttf},
                   {"ui", inter_ttf, sizeof inter_ttf},
-                  {"ui-medium", inter_medium_ttf, sizeof inter_medium_ttf}};
-    for (int i = 0; i < 3; ++i) {
+                  {"ui-medium", inter_medium_ttf, sizeof inter_medium_ttf},
+                  {"mono", mono_ttf, sizeof mono_ttf}};
+    for (int i = 0; i < 4; ++i) {
         // freeData = 0: NanoVG only reads the static array.
         nvg_font[i] = nvgCreateFontMem(vg, fonts[i].name,
                                        const_cast<unsigned char*>(fonts[i].data),
@@ -165,6 +169,7 @@ bool init(NVGcontext* vg) {
         }
     }
     nvgAddFallbackFontId(vg, nvg_font[Hand], nvg_font[Ui]);
+    nvgAddFallbackFontId(vg, nvg_font[Mono], nvg_font[Ui]);
     return true;
 }
 

@@ -17,7 +17,7 @@ std::string new_id() {
 
 static const char* kind_names[] = {"root",  "rect",  "ellipse", "diamond",
                                    "text",  "line",  "arrow",   "draw",
-                                   "image", "pdf",   "pdf-page"};
+                                   "image", "pdf",   "pdf-page", "code"};
 
 const char* kind_name(Kind k) { return kind_names[int(k)]; }
 
@@ -160,6 +160,9 @@ json node_to_json(const Node& n, bool recursive) {
     if (n.kind == Kind::PdfPage) {
         j["page"] = n.page;
     }
+    if (n.kind == Kind::Code) {
+        j["lang"] = n.lang;
+    }
     if (!n.start_bind.empty()) {
         j["start_bind"] = n.start_bind;
     }
@@ -196,6 +199,7 @@ std::unique_ptr<Node> node_from_json(const json& j) {
     n->style.stroke_width = j.value("stroke_width", 0.0);
     n->style.roughness = j.value("roughness", 1);
     n->style.font_size = j.value("font_size", 0.0);
+    n->lang = j.value("lang", "");
     n->seed = j.value("seed", 1u);
     if (j.contains("points")) {
         for (const auto& p : j["points"]) {
