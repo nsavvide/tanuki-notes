@@ -8,6 +8,7 @@
 #include "code.hpp"
 #include "render.hpp"
 #include "store.hpp"
+#include "text.hpp"
 #include "vim.hpp"
 
 #include <nlohmann/json.hpp>
@@ -461,6 +462,56 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
                 app.render(1);
             }
             finish_edit(app);
+            size_t before = app.root().children.size();
+
+            // A fence typed in a shape's label: the block goes below the shape.
+            app.set_tool(Tool::Rect);
+            drag(app, {700, 100}, {900, 200});
+            Node* box = app.root().children.back().get();
+            click(app, {800, 150}, 2);
+            CHECK(app.editing_ == box);
+            type(app, "```py");
+            app.key_down(SDLK_RETURN, {});
+            CHECK(box->kind == Kind::Rect && box->text.empty());
+            CHECK(app.editing_ && app.editing_->kind == Kind::Code &&
+                  app.editing_->y > box->y + box->h);
+            finish_edit(app);
+            CHECK(app.root().children.size() == before + 2);
+
+            // Fenced Markdown typed or pasted in one go is split on finish.
+            app.set_tool(Tool::Text);
+            click(app, {200, 650});
+            type(app, "intro\n```py\nx = 1\n```\noutro");
+            finish_edit(app);
+            auto& kids = app.root().children;
+            CHECK(kids.size() == before + 5);
+            CHECK(kids[before + 2]->text == "intro");
+            CHECK(kids[before + 3]->kind == Kind::Code && kids[before + 3]->text == "x = 1" &&
+                  kids[before + 3]->lang == "python");
+            CHECK(kids[before + 4]->kind == Kind::Text && kids[before + 4]->text == "outro");
+
+            // [[links]]: suggestions while typing, Enter completes, a click follows.
+            app.set_tool(Tool::Text);
+            click(app, {600, 500});
+            type(app, "see [[int");
+            CHECK(app.link_query() && app.link_query()->second == "int");
+            CHECK(!app.link_matches("int").empty() && app.link_matches("int")[0] == "intro");
+            app.key_down(SDLK_RETURN, {});
+            CHECK(app.editing_->text == "see [[intro]]");
+            Node* linker = app.editing_;
+            finish_edit(app);
+            tick(app);
+            app.render(1);
+            auto t = app.xform_of(linker);
+            TextLayout L = layout_text(vg, *linker, *t);
+            double lx = L.line_x[0] + text::measure(vg, text::Hand, "see [[in", L.px);
+            Vec2 at{lx, L.top + L.px * 0.6};
+            CHECK(app.link_at(at) == std::optional<std::string>("intro"));
+            click(app, at);
+            for (int i = 0; i < 40; ++i) {
+                tick(app);
+            }
+            CHECK(app.selection_.size() == 1 && app.selection_[0]->text == "intro");
         }
         fs::remove_all(d);
     }

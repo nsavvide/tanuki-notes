@@ -49,7 +49,8 @@ class App {
 
     // True while something animates or waits (so the loop keeps drawing).
     bool busy() const {
-        return flying_ || editing_ || search_open_ || labels_moving_ || drag_ != Drag::None || dirty_ ||
+        return flying_ || editing_ || search_open_ || labels_moving_ ||
+               !pending_link_.empty() || drag_ != Drag::None || dirty_ ||
                assets_.busy() || now_ < toast_until_;
     }
 
@@ -102,6 +103,16 @@ class App {
 
     void edit_selected();
     void refit_editing();
+    void split_fences(Node& n); // ```lang ... ``` in finished text -> code blocks
+
+    // [[links]] between notes, by title.
+    std::optional<std::string> link_at(Vec2 p);
+    void follow_link(const std::string& title);
+    // While typing "[[foo": where the "[[" starts, and "foo".
+    std::optional<std::pair<size_t, std::string>> link_query() const;
+    std::vector<std::string> link_matches(const std::string& query) const;
+    void accept_link();
+    void draw_link_popup();
     void open_code_block(const std::string& tag); // typed ```tag + Enter in a note
     void close_code_block();                      // typed ``` + Enter in a code block
 
@@ -191,6 +202,10 @@ class App {
     Node* editing_ = nullptr;
     size_t caret_ = 0;
     vim::Editor vim_;
+    int link_sel_ = 0;
+    std::string link_last_query_;
+    std::string pending_link_; // clicked link, followed unless it's a double-click
+    double pending_link_at_ = 0;
     double caret_blink_start_ = 0;
 
     // History.

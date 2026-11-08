@@ -53,6 +53,10 @@ CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos);
 // The node's text as it is laid out on screen, line by line.
 std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t);
 
+// [[links]] in a line of text: byte ranges [begin, end) including brackets.
+std::vector<text::Span> link_spans(std::string_view line);
+constexpr uint32_t link_color = 0x6965dbff;
+
 // Draws `node` and everything inside it that is visible.
 void draw_subtree(RenderCtx& ctx, const Node& node, Xform t);
 

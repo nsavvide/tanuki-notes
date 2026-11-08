@@ -233,12 +233,47 @@ static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     }
     TextLayout L = layout_text(ctx.vg, n, t);
     NVGcolor c = color(n.style.stroke, alpha);
+    NVGcolor lc = color(link_color, alpha);
     for (size_t i = 0; i < L.lines.size(); ++i) {
         const auto& span = L.lines[i];
-        text::draw_line(ctx.vg, text::Hand,
-                        n.text.substr(span.begin, span.end - span.begin),
-                        L.line_x[i], L.top + i * L.px * text::line_height, L.px,
-                        c, ctx.viewport);
+        std::string line = n.text.substr(span.begin, span.end - span.begin);
+        double x = L.line_x[i], y = L.top + i * L.px * text::line_height;
+        size_t p = 0;
+        // Plain text and [[links]] (in the accent color, underlined).
+        auto piece = [&](size_t a, size_t b, bool link) {
+            std::string part = line.substr(a, b - a);
+            double w = text::measure(ctx.vg, text::Hand, part, L.px);
+            text::draw_line(ctx.vg, text::Hand, part, x, y, L.px, link ? lc : c,
+                            ctx.viewport);
+            if (link && L.px >= 3) {
+                nvgBeginPath(ctx.vg);
+                nvgRect(ctx.vg, float(x), float(y + L.px * 1.12), float(w),
+                        float(std::max(1.0, L.px / 18)));
+                nvgFillColor(ctx.vg, lc);
+                nvgFill(ctx.vg);
+            }
+            x += w;
+        };
+        for (const auto& l : link_spans(line)) {
+            piece(p, l.begin, false);
+            piece(l.begin, l.end, true);
+            p = l.end;
+        }
+        piece(p, line.size(), false);
+    }
+}
+
+std::vector<text::Span> link_spans(std::string_view line) {
+    std::vector<text::Span> out;
+    size_t p = 0;
+    while (true) {
+        size_t a = line.find("[[", p);
+        size_t b = a == std::string_view::npos ? a : line.find("]]", a + 2);
+        if (b == std::string_view::npos) {
+            return out;
+        }
+        out.push_back({a, b + 2});
+        p = b + 2;
     }
 }
 

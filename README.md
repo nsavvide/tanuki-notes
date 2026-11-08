@@ -29,7 +29,8 @@ The fonts are compiled into the binary, so after `install` you can run
 | Pan | middle-drag, space + drag, hand tool, shift + scroll |
 | Dive into a shape | double-click inside it (not on its label), Enter, or mouse forward button |
 | Zoom out one level | Esc or Backspace (with nothing selected), mouse back button, or the level badge; the shape you left stays selected, so Esc again keeps going out |
-| Code block | in a note, type ```` ```py ```` (or rs, cpp, ts, …) and Enter; ```` ``` ```` + Enter ends it. Change the language in the left panel |
+| Code block | in a note or label, type ```` ```py ```` (or rs, cpp, ts, …) and Enter; ```` ``` ```` + Enter ends it. Pasted fenced Markdown becomes code blocks when you finish editing. Change the language in the left panel |
+| Link to a note | type `[[` and pick a title (↑↓, Enter/Tab); click the link to fly there. Links match a note's or shape's first line, or a file name |
 | Fit everything | Home or Shift+1 |
 | Jump to a parent | click it in the breadcrumb (top left) |
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |

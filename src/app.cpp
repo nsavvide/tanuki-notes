@@ -705,6 +705,9 @@ void App::finish_text_edit() {
     Node* n = editing_;
     editing_ = nullptr;
     SDL_StopTextInput(window_);
+    if (n->kind != Kind::Code) {
+        split_fences(*n);
+    }
     bool blank = n->text.find_first_not_of(" \n\t") == std::string::npos;
     if (n->kind == Kind::Text && blank) {
         std::erase(selection_, n);
@@ -1019,7 +1022,8 @@ void App::open_code_block(const std::string& tag) {
     std::string lang = code::from_fence(tag);
     code_lang_ = lang;
     double fs = note->style.font_size * 0.8;
-    if (note->text.find_first_not_of(" \n\t") == std::string::npos) {
+    if (note->kind == Kind::Text &&
+        note->text.find_first_not_of(" \n\t") == std::string::npos) {
         // The note was just the fence: it becomes the code block.
         note->kind = Kind::Code;
         note->lang = lang;
@@ -1030,7 +1034,9 @@ void App::open_code_block(const std::string& tag) {
         vim_.begin(note->text, 0);
         return;
     }
-    fit_text_bounds(vg_, *note);
+    if (note->kind == Kind::Text) {
+        fit_text_bounds(vg_, *note);
+    }
     auto c = make_node(Kind::Code);
     c->lang = lang;
     c->style = note->style;
@@ -1040,6 +1046,77 @@ void App::open_code_block(const std::string& tag) {
     c->y = note->y + note->h + note->style.font_size * 0.5;
     Node& added = add_child(*note->parent, std::move(c));
     start_text_edit(added);
+}
+
+void App::split_fences(Node& n) {
+    std::string& s = n.text;
+    // [start, end) of the first line at or after `from` that starts with ```.
+    auto fence_line = [&](size_t from) -> std::pair<size_t, size_t> {
+        for (size_t ls = from; ls <= s.size();) {
+            size_t le = std::min(s.find('\n', ls), s.size());
+            size_t a = s.find_first_not_of(" \t", ls);
+            if (a < le && s.compare(a, 3, "```") == 0) {
+                return {ls, le};
+            }
+            ls = le + 1;
+        }
+        return {std::string::npos, std::string::npos};
+    };
+    auto [o1, o2] = fence_line(0);
+    if (o1 == std::string::npos || o2 >= s.size()) {
+        return;
+    }
+    auto [c1, c2] = fence_line(o2 + 1);
+    if (c1 == std::string::npos) {
+        return; // not closed yet
+    }
+    std::string open = s.substr(o1, o2 - o1);
+    std::string lang = code::from_fence(open.substr(open.find("```") + 3));
+    std::string body = c1 > o2 + 1 ? s.substr(o2 + 1, c1 - 1 - (o2 + 1)) : "";
+    std::string after = c2 < s.size() ? s.substr(c2 + 1) : "";
+    std::string before = s.substr(0, o1);
+    auto blank = [](const std::string& t) {
+        return t.find_first_not_of(" \n\t") == std::string::npos;
+    };
+    while (!before.empty() && (before.back() == '\n' || before.back() == ' ')) {
+        before.pop_back();
+    }
+    after.erase(0, std::min(after.find_first_not_of('\n'), after.size()));
+
+    double fs = n.style.font_size;
+    Node* block;
+    if (n.kind == Kind::Text && blank(before)) {
+        n.kind = Kind::Code;
+        n.lang = lang;
+        n.text = body;
+        n.style.font_size = fs * 0.8;
+        fit_code_bounds(vg_, n);
+        block = &n;
+    } else {
+        n.text = before;
+        if (n.kind == Kind::Text) {
+            fit_text_bounds(vg_, n);
+        }
+        auto c = make_node(Kind::Code);
+        c->lang = lang;
+        c->text = body;
+        c->style = n.style;
+        c->style.font_size = fs * 0.8;
+        fit_code_bounds(vg_, *c);
+        c->x = n.x;
+        c->y = n.y + n.h + fs * 0.5;
+        block = &add_child(*n.parent, std::move(c));
+    }
+    if (!blank(after)) {
+        auto t = make_node(Kind::Text);
+        t->style = block->style;
+        t->style.font_size = fs;
+        t->text = after;
+        fit_text_bounds(vg_, *t);
+        t->x = block->x;
+        t->y = block->y + block->h + fs * 0.5;
+        split_fences(add_child(*block->parent, std::move(t)));
+    }
 }
 
 void App::close_code_block() {
@@ -1055,6 +1132,165 @@ void App::close_code_block() {
     fit_text_bounds(vg_, *n);
     Node& added = add_child(*block->parent, std::move(n));
     start_text_edit(added);
+}
+
+// The title a [[link]] matches: a note's or label's first line, or a file name.
+static std::string link_title(const Node& n) {
+    if (n.kind == Kind::Root || n.kind == Kind::Code || n.kind == Kind::Line ||
+        n.kind == Kind::Arrow || n.kind == Kind::Draw || n.kind == Kind::PdfPage) {
+        return "";
+    }
+    std::string first = n.text.substr(0, n.text.find('\n'));
+    while (!first.empty() && first.back() == ' ') {
+        first.pop_back();
+    }
+    if (!first.empty()) {
+        return first;
+    }
+    return n.asset.empty() ? "" : display_name(n);
+}
+
+static std::string lower_ascii(std::string s) {
+    for (char& c : s) {
+        c = char(std::tolower((unsigned char)c));
+    }
+    return s;
+}
+
+std::optional<std::string> App::link_at(Vec2 p) {
+    Node* n = pick(p);
+    auto t = n ? xform_of(n) : std::nullopt;
+    if (!t || n->kind == Kind::Code || n->text.find("[[") == std::string::npos) {
+        return std::nullopt;
+    }
+    TextLayout L = layout_text(vg_, *n, *t);
+    for (size_t i = 0; i < L.lines.size(); ++i) {
+        std::string line = n->text.substr(L.lines[i].begin, L.lines[i].end - L.lines[i].begin);
+        double y = L.top + i * L.px * text::line_height;
+        if (p.y < y || p.y > y + L.px * text::line_height) {
+            continue;
+        }
+        for (const auto& l : link_spans(line)) {
+            double x0 = L.line_x[i] + text::measure(vg_, text::Hand, line.substr(0, l.begin), L.px);
+            double x1 = L.line_x[i] + text::measure(vg_, text::Hand, line.substr(0, l.end), L.px);
+            if (p.x >= x0 && p.x <= x1) {
+                return line.substr(l.begin + 2, l.end - l.begin - 4);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+void App::follow_link(const std::string& title) {
+    std::string want = lower_ascii(title);
+    // Shallowest match first.
+    std::vector<Node*> level{root_.get()};
+    while (!level.empty()) {
+        std::vector<Node*> next;
+        for (Node* n : level) {
+            if (lower_ascii(link_title(*n)) == want) {
+                selection_ = {n};
+                fly_to(n);
+                return;
+            }
+            for (auto& c : n->children) {
+                next.push_back(c.get());
+            }
+        }
+        level.swap(next);
+    }
+    toast("No note called \u201c" + title + "\u201d");
+}
+
+std::optional<std::pair<size_t, std::string>> App::link_query() const {
+    if (!editing_ || editing_->kind == Kind::Code || vim_.mode != vim::Mode::Insert) {
+        return std::nullopt;
+    }
+    const std::string& s = editing_->text;
+    size_t open = caret_ < 2 ? std::string::npos : s.rfind("[[", caret_ - 2);
+    if (open == std::string::npos) {
+        return std::nullopt;
+    }
+    std::string q = s.substr(open + 2, caret_ - open - 2);
+    if (q.find('\n') != std::string::npos || q.find("]]") != std::string::npos) {
+        return std::nullopt;
+    }
+    return std::pair{open, q};
+}
+
+std::vector<std::string> App::link_matches(const std::string& query) const {
+    std::string q = lower_ascii(query);
+    std::vector<std::pair<int, std::string>> found;
+    std::set<std::string> seen;
+    std::function<void(const Node&)> walk = [&](const Node& n) {
+        std::string title = link_title(n);
+        if (&n != editing_ && !title.empty() && !seen.contains(title)) {
+            std::string lt = lower_ascii(title);
+            size_t at = lt.find(q);
+            if (at != std::string::npos) {
+                bool word = at == 0 || lt[at - 1] == ' ';
+                found.push_back({at == 0 ? 0 : word ? 1 : 2, title});
+                seen.insert(title);
+            }
+        }
+        for (const auto& c : n.children) {
+            walk(*c);
+        }
+    };
+    walk(*root_);
+    std::ranges::sort(found, [](auto& a, auto& b) {
+        return a.first != b.first ? a.first < b.first : a.second.size() < b.second.size();
+    });
+    std::vector<std::string> out;
+    for (size_t i = 0; i < found.size() && i < 8; ++i) {
+        out.push_back(found[i].second);
+    }
+    return out;
+}
+
+void App::accept_link() {
+    auto q = link_query();
+    auto matches = q ? link_matches(q->second) : std::vector<std::string>{};
+    if (matches.empty()) {
+        return;
+    }
+    const std::string& title = matches[size_t(std::clamp(link_sel_, 0, int(matches.size()) - 1))];
+    std::string& s = editing_->text;
+    size_t start = q->first + 2;
+    std::string add = title + "]]";
+    s.replace(start, caret_ - start, add);
+    caret_ = start + add.size();
+    refit_editing();
+}
+
+void App::draw_link_popup() {
+    auto q = link_query();
+    auto t = editing_ ? xform_of(editing_) : std::nullopt;
+    if (!q || !t) {
+        return;
+    }
+    if (q->second != link_last_query_) {
+        link_last_query_ = q->second;
+        link_sel_ = 0;
+    }
+    auto matches = link_matches(q->second);
+    if (matches.empty()) {
+        return;
+    }
+    link_sel_ = std::clamp(link_sel_, 0, int(matches.size()) - 1);
+    CaretBox c = caret_box(vg_, *editing_, *t, caret_);
+    double w = 280, row = 30;
+    Rect panel{std::clamp(c.x, 8.0, win_w_ - w - 8), c.y + c.h + 6, w,
+               8 + matches.size() * row};
+    if (panel.bottom() > win_h_ - 8) {
+        panel.y = c.y - panel.h - 6;
+    }
+    ui::island(vg_, panel);
+    for (size_t i = 0; i < matches.size(); ++i) {
+        Rect r{panel.x + 4, panel.y + 4 + i * row, w - 8, row};
+        ui::button_bg(vg_, r, int(i) == link_sel_, false);
+        ui::label(vg_, matches[i], r.x + 10, r.center().y, 13.5f, ui::rgb(ui::ink));
+    }
 }
 
 void App::edit_selected() {
@@ -1511,6 +1747,7 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
     // label edited first, since it has nothing inside to dive into yet.
     Node* hit = pick(p);
     if (clicks >= 2) {
+        pending_link_.clear();
         if (hit && (hit->kind == Kind::Text || hit->kind == Kind::Code)) {
             start_text_edit(*hit);
             return;
@@ -1531,6 +1768,15 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
             fly_to(box);
         }
         return;
+    }
+
+    // A click on a [[link]] follows it, unless a second click turns it into
+    // a double-click (see update()).
+    if (!editing_) {
+        if (auto title = link_at(p)) {
+            pending_link_ = *title;
+            pending_link_at_ = now_;
+        }
     }
 
     // Select tool: handles first, then shapes, then empty space.
@@ -1875,6 +2121,19 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 return;
             }
         }
+        if (auto q = link_query(); q && !link_matches(q->second).empty()) {
+            switch (key) {
+            case SDLK_UP: --link_sel_; return;
+            case SDLK_DOWN: ++link_sel_; return;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+            case SDLK_TAB:
+                accept_link();
+                return;
+            default:
+                break;
+            }
+        }
         switch (key) {
         case SDLK_ESCAPE:
             vim_.to_normal(s, caret_);
@@ -1901,7 +2160,7 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 trimmed.pop_back();
             }
             bool at_eol = le == caret_ || (le == std::string::npos && caret_ == s.size());
-            if (at_eol && editing_->kind == Kind::Text && trimmed.starts_with("```")) {
+            if (at_eol && editing_->kind != Kind::Code && trimmed.starts_with("```")) {
                 open_code_block(trimmed.substr(3));
                 return;
             }
@@ -2154,6 +2413,15 @@ void App::update(double now, int win_w, int win_h) {
         insert_file(files[i], {win_w_ / 2.0 + 24.0 * i, win_h_ / 2.0 + 24.0 * i});
     }
 
+    if (!pending_link_.empty() && (moved_ || drag_ != Drag::None)) {
+        if (moved_) {
+            pending_link_.clear(); // it was a drag
+        }
+    } else if (!pending_link_.empty() && now_ - pending_link_at_ > 0.3) {
+        std::string title = std::move(pending_link_);
+        pending_link_.clear();
+        follow_link(title);
+    }
     step_fly(dt);
     clamp_zoom();
     reroot();
@@ -2182,6 +2450,7 @@ void App::render(float pixel_ratio) {
 
     draw_overlay();
     draw_ui();
+    draw_link_popup();
     nvgEndFrame(vg_);
 
     hits_ = std::move(next_hits_);
