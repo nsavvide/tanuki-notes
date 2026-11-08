@@ -46,8 +46,6 @@ add_executable(tanuki-notes
     src/text.cpp
     src/ui.cpp
 )
-target_compile_definitions(tanuki-notes PRIVATE
-    TANUKI_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_link_libraries(tanuki-notes PRIVATE
     SDL3::SDL3 nanovg nlohmann_json::nlohmann_json OpenGL::GL
     PkgConfig::POPPLER)
@@ -55,3 +53,10 @@ target_compile_options(tanuki-notes PRIVATE -Wall -Wextra
     $<$<CONFIG:Debug>:-fsanitize=address,undefined>)
 target_link_options(tanuki-notes PRIVATE
     $<$<CONFIG:Debug>:-fsanitize=address,undefined>)
+
+# Fonts are compiled in (#embed in src/text.cpp), so the binary is all you need.
+set_property(SOURCE src/text.cpp APPEND PROPERTY OBJECT_DEPENDS
+    ${CMAKE_SOURCE_DIR}/assets/fonts/Virgil.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/Inter-Regular.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/Inter-Medium.ttf)
+install(TARGETS tanuki-notes)

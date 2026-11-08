@@ -255,6 +255,65 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         std::println("map written to {}", dir.string());
     }
 
+    // A map inside a project repo commits only itself, no nested repo.
+    {
+        fs::path proj = dir;
+        proj += "-proj";
+        fs::remove_all(proj);
+        fs::create_directories(proj / "docs" / "map");
+        std::string git = "git -C '" + proj.string() + "' ";
+        std::ofstream(proj / "code.txt") << "draft\n";
+        CHECK(std::system((git + "init -q && " + git + "add code.txt").c_str()) == 0);
+        std::ofstream(proj / "docs" / "map" / "board.json") << "{}\n";
+        CHECK(store::git_commit(proj / "docs" / "map") == "Committed");
+        CHECK(!fs::exists(proj / "docs" / "map" / ".git"));
+        // code.txt is still staged, not committed.
+        CHECK(std::system((git + "diff --cached --quiet -- code.txt").c_str()) != 0);
+        CHECK(std::system((git + "cat-file -e HEAD:docs/map/board.json").c_str()) == 0);
+        fs::remove_all(proj);
+    }
+
+    // Double-click: blank shape -> edit label; shape with content -> dive in;
+    // mouse back button -> out again.
+    {
+        fs::path d = dir;
+        d += "-dive";
+        fs::remove_all(d);
+        {
+            App app(vg, window, d);
+            tick(app);
+            app.set_tool(Tool::Rect);
+            drag(app, {100, 100}, {500, 400});
+            app.set_tool(Tool::Rect);
+            drag(app, {900, 500}, {1000, 600});
+            Node* box = app.root().children[0].get();
+            click(app, {300, 250}, 2);
+            CHECK(app.editing_ == box);
+            type(app, "Box");
+            app.key_down(SDLK_ESCAPE, {});
+            click(app, {1200, 750});
+            app.set_tool(Tool::Rect);
+            drag(app, {350, 300}, {450, 380});
+            CHECK(box->children.size() == 1);
+            click(app, {1200, 750});
+
+            auto width = [&] { return app.screen_rect_of(box)->w; };
+            click(app, {150, 350}, 2); // inside, away from title and child
+            CHECK(!app.editing_);
+            for (int i = 0; i < 120; ++i) {
+                tick(app);
+            }
+            CHECK(width() > 800);
+            app.mouse_down({640, 400}, SDL_BUTTON_X1, 1, {});
+            app.mouse_up({640, 400}, SDL_BUTTON_X1, {});
+            for (int i = 0; i < 120; ++i) {
+                tick(app);
+            }
+            CHECK(width() < 700);
+        }
+        fs::remove_all(d);
+    }
+
     // Arrows attached to shapes follow them.
     fs::path dir2 = dir;
     dir2 += "-bind";

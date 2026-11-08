@@ -157,19 +157,24 @@ void save_view(const fs::path& dir, const View& v) {
 static int run(const std::string& cmd) { return std::system(cmd.c_str()); }
 
 std::string git_commit(const fs::path& dir) {
-    std::string q = "'" + dir.string() + "'";
-    if (!fs::exists(dir / ".git") && run("git -C " + q + " init -q") != 0) {
+    std::string git = "git -C '" + dir.string() + "' ";
+    // A map inside an existing repo (say a project's docs/map) uses that repo;
+    // otherwise it gets its own. Either way only the map folder is staged and
+    // committed ("-- ."), so other work in the repo is left alone.
+    bool in_repo =
+        run(git + "rev-parse --is-inside-work-tree >/dev/null 2>&1") == 0;
+    if (!in_repo && run(git + "init -q") != 0) {
         return "git init failed";
     }
-    run("git -C " + q + " add -A");
-    if (run("git -C " + q + " diff --cached --quiet") == 0) {
+    run(git + "add -A -- .");
+    if (run(git + "diff --cached --quiet -- .") == 0) {
         return "Nothing to commit";
     }
     std::time_t t = std::time(nullptr);
     char stamp[32];
     std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M", std::localtime(&t));
     std::string msg = std::string("tanuki: ") + stamp;
-    if (run("git -C " + q + " commit -q -m '" + msg + "'") != 0) {
+    if (run(git + "commit -q -m '" + msg + "' -- .") != 0) {
         return "git commit failed";
     }
     return "Committed";

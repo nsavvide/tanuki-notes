@@ -20,11 +20,15 @@ test)
     "$0" debug
     ./build/tanuki-notes --selftest
     ;;
+install) # ./build.sh install [prefix], default ~/.local (binary in ~/.local/bin)
+    "$0" release
+    cmake --install build-release --prefix "${2:-$HOME/.local}"
+    ;;
 clean)
     rm -rf build build-release
     ;;
 *)
-    echo "usage: $0 [debug|release|run [map-folder]|test|clean]" >&2
+    echo "usage: $0 [debug|release|run [map-folder]|test|install [prefix]|clean]" >&2
     exit 1
     ;;
 esac

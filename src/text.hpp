@@ -17,7 +17,7 @@ enum Font { Hand, Ui, UiMedium };
 
 constexpr double line_height = 1.25; // times font size, like Excalidraw
 
-bool init(NVGcontext* vg, const std::string& font_dir);
+bool init(NVGcontext* vg);
 
 // Advance width of `s` at `px` font size.
 double measure(NVGcontext* vg, Font f, const std::string& s, double px);

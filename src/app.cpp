@@ -395,6 +395,25 @@ void App::clamp_zoom() {
     }
 }
 
+bool App::on_label(const Node& n, Vec2 p) const {
+    auto t = xform_of(&n);
+    if (!t || n.text.empty()) {
+        return false;
+    }
+    TextLayout L = layout_text(vg_, n, *t);
+    for (size_t i = 0; i < L.lines.size(); ++i) {
+        const auto& sp = L.lines[i];
+        double w = text::measure(vg_, text::Hand,
+                                 n.text.substr(sp.begin, sp.end - sp.begin), L.px);
+        double h = L.px * text::line_height;
+        Rect line{L.line_x[i], L.top + i * h, w, h};
+        if (line.expanded(6).contains(p)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool App::hit_self(const Node& n, Xform t, Vec2 p) const {
     Rect r = screen_rect(n, t);
     double sw = n.style.stroke_width * parent_scale(n, t);
@@ -1333,6 +1352,17 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
         drag_last_ = p;
         return;
     }
+    if (button == SDL_BUTTON_X1) { // mouse "back": zoom out a level
+        fly_out();
+        return;
+    }
+    if (button == SDL_BUTTON_X2) { // mouse "forward": dive into the shape
+        Node* box = container_at(p, nullptr);
+        if (!is_ancestor(box, anchor_)) {
+            fly_to(box);
+        }
+        return;
+    }
     if (button != SDL_BUTTON_LEFT) {
         return;
     }
@@ -1385,15 +1415,29 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
         return;
     }
 
-    // Double-click: edit a shape's label or a text, or start a new text.
+    // Double-click: on words, edit them; inside a shape, dive into it; on
+    // the empty background, start a new text. A blank new shape gets its
+    // label edited first, since it has nothing inside to dive into yet.
     Node* hit = pick(p);
     if (clicks >= 2) {
-        if (hit && (hit->kind == Kind::Text || hit->kind == Kind::Rect ||
-                    hit->kind == Kind::Ellipse || hit->kind == Kind::Diamond)) {
+        if (hit && hit->kind == Kind::Text) {
             start_text_edit(*hit);
-        } else if (!hit) {
+            return;
+        }
+        if (hit && !hit->is_container()) {
+            return; // lines, drawings, images
+        }
+        Node* box = hit ? hit : container_at(p, nullptr);
+        if (is_ancestor(box, anchor_)) { // the world we're already in
             tool_ = Tool::Text;
             mouse_down(p, button, 1, m);
+        } else if (box->kind != Kind::Pdf &&
+                   ((box->text.empty() && box->children.empty()) ||
+                    on_label(*box, p))) {
+            start_text_edit(*box);
+        } else {
+            selection_.clear();
+            fly_to(box);
         }
         return;
     }
@@ -2405,7 +2449,7 @@ void App::draw_ui() {
     draw_search();
 
     // Hint, bottom right.
-    ui::label(vg, "Scroll to zoom  ·  Ctrl+F search  ·  Enter dives in  ·  Esc zooms out",
+    ui::label(vg, "Double-click a shape to dive in  ·  Esc zooms out  ·  Ctrl+F search",
               win_w_ - 20.0, win_h_ - 36.0, 12, ui::rgb(0xadb5bd), false,
               NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 

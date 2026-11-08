@@ -86,6 +86,7 @@ class App {
     Node* pick(Vec2 p);
     Node* pick_in(Node& n, Xform t, Vec2 p);
     bool hit_self(const Node& n, Xform t, Vec2 p) const;
+    bool on_label(const Node& n, Vec2 p) const; // over the shape's label text
     Node* container_at(Vec2 p, const Node* exclude);
     void reroot();
     void clamp_zoom();

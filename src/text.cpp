@@ -6,8 +6,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
 
-#include <fstream>
-#include <iterator>
 
 namespace text {
 
@@ -16,8 +14,18 @@ namespace {
 constexpr double ref_px = 100;    // measuring size
 constexpr double vector_px = 120; // above this, draw outlines
 
+// The fonts live inside the binary.
+const unsigned char virgil_ttf[] = {
+#embed "../assets/fonts/Virgil.ttf"
+};
+const unsigned char inter_ttf[] = {
+#embed "../assets/fonts/Inter-Regular.ttf"
+};
+const unsigned char inter_medium_ttf[] = {
+#embed "../assets/fonts/Inter-Medium.ttf"
+};
+
 struct VecFont {
-    std::vector<unsigned char> data;
     stbtt_fontinfo info{};
     double ascent = 0; // per px of font size
 };
@@ -25,12 +33,8 @@ struct VecFont {
 int nvg_font[3] = {-1, -1, -1};
 VecFont vec_font[3];
 
-bool load(VecFont& f, const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    f.data.assign(std::istreambuf_iterator<char>(in), {});
-    if (f.data.empty() ||
-        !stbtt_InitFont(&f.info, f.data.data(),
-                        stbtt_GetFontOffsetForIndex(f.data.data(), 0))) {
+bool load(VecFont& f, const unsigned char* data) {
+    if (!stbtt_InitFont(&f.info, data, stbtt_GetFontOffsetForIndex(data, 0))) {
         return false;
     }
     int asc, desc, gap;
@@ -143,14 +147,20 @@ void draw_vector(NVGcontext* vg, Font f, const std::string& s, double x,
 
 } // namespace
 
-bool init(NVGcontext* vg, const std::string& dir) {
-    const char* files[3] = {"Virgil.ttf", "Inter-Regular.ttf",
-                            "Inter-Medium.ttf"};
-    const char* names[3] = {"hand", "ui", "ui-medium"};
+bool init(NVGcontext* vg) {
+    struct {
+        const char* name;
+        const unsigned char* data;
+        int size;
+    } fonts[3] = {{"hand", virgil_ttf, sizeof virgil_ttf},
+                  {"ui", inter_ttf, sizeof inter_ttf},
+                  {"ui-medium", inter_medium_ttf, sizeof inter_medium_ttf}};
     for (int i = 0; i < 3; ++i) {
-        std::string path = dir + "/" + files[i];
-        nvg_font[i] = nvgCreateFont(vg, names[i], path.c_str());
-        if (nvg_font[i] < 0 || !load(vec_font[i], path)) {
+        // freeData = 0: NanoVG only reads the static array.
+        nvg_font[i] = nvgCreateFontMem(vg, fonts[i].name,
+                                       const_cast<unsigned char*>(fonts[i].data),
+                                       fonts[i].size, 0);
+        if (nvg_font[i] < 0 || !load(vec_font[i], fonts[i].data)) {
             return false;
         }
     }

@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
     SDL_GL_SetSwapInterval(1);
 
     NVGcontext* vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
-    if (!vg || !text::init(vg, TANUKI_ASSET_DIR "/fonts")) {
+    if (!vg || !text::init(vg)) {
         std::println(stderr, "NanoVG or fonts failed to load");
         return 1;
     }
