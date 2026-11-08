@@ -6,6 +6,7 @@
 
 #include "app.hpp"
 #include "code.hpp"
+#include "note.hpp"
 #include "render.hpp"
 #include "store.hpp"
 #include "text.hpp"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 #include <print>
 #include <unistd.h>
 
@@ -420,7 +422,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
 
             // ```py + Enter in an empty note turns it into a code block.
             app.set_tool(Tool::Text);
-            click(app, {200, 400});
+            click(app, {600, 400});
             type(app, "```py");
             app.key_down(SDLK_RETURN, {});
             Node* code = app.root().children[1].get();
@@ -503,15 +505,150 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             tick(app);
             app.render(1);
             auto t = app.xform_of(linker);
-            TextLayout L = layout_text(vg, *linker, *t);
-            double lx = L.line_x[0] + text::measure(vg, text::Hand, "see [[in", L.px);
-            Vec2 at{lx, L.top + L.px * 0.6};
+            CaretBox cb = caret_box(vg, *linker, *t, 8); // inside "intro"
+            Vec2 at{cb.x + 1, cb.y + cb.h / 2};
             CHECK(app.link_at(at) == std::optional<std::string>("intro"));
             click(app, at);
             for (int i = 0; i < 40; ++i) {
                 tick(app);
             }
             CHECK(app.selection_.size() == 1 && app.selection_[0]->text == "intro");
+        }
+        fs::remove_all(d);
+    }
+
+    // Notion-style notes.
+    {
+        // Layout: markers hidden, except on the raw (caret) line.
+        auto L = note::layout(vg, "# Title\n- item **bold**", 26, -1);
+        CHECK(L->lines.size() == 2);
+        CHECK(L->decos.size() == 1 && L->decos[0].kind == note::DecoKind::Bullet);
+        CHECK(std::ranges::all_of(L->pieces, [](auto& p) {
+            return !(p.flags & note::Marker);
+        }));
+        CHECK(L->lines[0].h > L->lines[1].h); // the heading is bigger
+        auto raw = note::layout(vg, "# Title\n- item **bold**", 26, 1);
+        CHECK(raw->decos.empty()); // the raw line shows "- " instead of a bullet
+        CHECK(std::ranges::any_of(raw->pieces, [](auto& p) { return p.flags & note::Marker; }));
+        // The text after a marker stays put when it turns raw.
+        auto x_of = [&](const note::Layout& l, size_t pos) {
+            return l.caret(vg, "# Title\n- item **bold**", pos).x;
+        };
+        CHECK(near(x_of(*L, 10), x_of(*raw, 10), 1e-9));
+        // Wrapping at the page width.
+        std::string para(300, 'a');
+        for (size_t i = 5; i < para.size(); i += 6) {
+            para[i] = ' ';
+        }
+        CHECK(note::layout(vg, para, 10, -1)->lines.size() > 5);
+        // Byte -> point -> byte.
+        auto c = L->caret(vg, "# Title\n- item **bold**", 12);
+        CHECK(L->hit(vg, "# Title\n- item **bold**", c.x + 0.01, c.y + 0.5) == 12);
+
+        fs::path d = dir;
+        d += "-notes";
+        fs::remove_all(d);
+        {
+            App app(vg, window, d);
+            tick(app);
+            app.set_tool(Tool::Text);
+            click(app, {600, 150});
+            Node* n = app.editing_;
+            CHECK(n && near(n->w, note::default_width * n->style.font_size));
+            type(app, "- one");
+            app.key_down(SDLK_RETURN, {});
+            type(app, "two");
+            app.key_down(SDLK_TAB, {});
+            CHECK(n->text == "- one\n  - two");
+            app.key_down(SDLK_RETURN, {});
+            app.key_down(SDLK_RETURN, {}); // empty item: ends the list
+            type(app, "1. a");
+            app.key_down(SDLK_RETURN, {});
+            type(app, "b");
+            app.key_down(SDLK_RETURN, {});
+            app.key_down(SDLK_RETURN, {}); // "3. " left empty: the list ends
+            type(app, "- [x] done");
+            app.key_down(SDLK_RETURN, {});
+            type(app, "todo");
+            CHECK(n->text == "- one\n  - two\n1. a\n2. b\n- [x] done\n- [ ] todo");
+            // Backspace at the start of an item drops its marker.
+            app.key_down(SDLK_HOME, {});
+            for (int i = 0; i < 6; ++i) {
+                app.key_down(SDLK_RIGHT, {});
+            }
+            app.key_down(SDLK_BACKSPACE, {});
+            CHECK(n->text.ends_with("\ntodo"));
+            // Clicking in the text moves the caret.
+            auto t = app.xform_of(n);
+            CaretBox first = caret_box(vg, *n, *t, 3, app.raw_line());
+            click(app, {first.x + 0.5, first.y + first.h / 2});
+            CHECK(app.caret_ == 3);
+            finish_edit(app);
+            CHECK(!app.editing_);
+
+            // A click on a checkbox ticks it (and unticks it).
+            tick(app);
+            app.render(1);
+            t = app.xform_of(n);
+            double em = n->style.font_size * t->s / n->w;
+            auto lay = note::layout(vg, n->text, n->w / n->style.font_size, -1);
+            auto box = std::ranges::find_if(lay->decos, [](auto& dd) {
+                return dd.kind == note::DecoKind::Checkbox;
+            });
+            CHECK(box != lay->decos.end());
+            Vec2 at{t->ox + (box->x + 0.4) * em, t->oy + (box->y + 0.4) * em};
+            click(app, at);
+            CHECK(n->text.find("- [ ] done") != std::string::npos);
+            click(app, {1200, 750});
+            click(app, at);
+            CHECK(n->text.find("- [x] done") != std::string::npos);
+
+            // Side handles change the page width; text re-wraps.
+            n->text += "\nA long sentence that has to wrap once the page gets narrower.";
+            fit_text_bounds(vg, *n);
+            app.selection_ = {n};
+            double h0 = n->h;
+            auto r = *app.screen_rect_of(n);
+            drag(app, {r.right() + 4, r.center().y}, {r.x + r.w * 0.4, r.center().y});
+            CHECK(n->w < note::default_width * n->style.font_size * 0.6);
+            CHECK(n->h > h0);
+        }
+        fs::remove_all(d);
+    }
+
+    // Auto colors: siblings get different hues, a child never its parent's.
+    {
+        fs::path d = dir;
+        d += "-color";
+        fs::remove_all(d);
+        {
+            App app(vg, window, d);
+            tick(app);
+            std::set<int> hues;
+            for (int i = 0; i < 4; ++i) {
+                app.set_tool(Tool::Rect);
+                drag(app, {100.0 + i * 250, 100}, {300.0 + i * 250, 300});
+                Node* n = app.root().children.back().get();
+                CHECK(ui::hue_of(n->style.fill) >= 0);
+                CHECK(ui::hue_of(n->style.stroke) == ui::hue_of(n->style.fill));
+                hues.insert(ui::hue_of(n->style.fill));
+            }
+            CHECK(hues.size() == 4);
+            Node* outer = app.root().children[0].get();
+            app.set_tool(Tool::Ellipse);
+            drag(app, {150, 150}, {250, 250});
+            CHECK(outer->children.size() == 1);
+            CHECK(ui::hue_of(outer->children[0]->style.fill) != ui::hue_of(outer->style.fill));
+            // Off: new shapes use the chosen style.
+            app.auto_color_ = false;
+            app.style_.fill = 0;
+            app.set_tool(Tool::Rect);
+            drag(app, {100, 500}, {300, 700});
+            CHECK(app.root().children.back()->style.fill == 0);
+            for (int i = 0; i < 3; ++i) {
+                tick(app);
+                app.render(1);
+            }
         }
         fs::remove_all(d);
     }

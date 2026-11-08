@@ -27,14 +27,21 @@ const unsigned char inter_medium_ttf[] = {
 const unsigned char mono_ttf[] = {
 #embed "../assets/fonts/JetBrainsMono-Regular.ttf"
 };
+const unsigned char inter_bold_ttf[] = {
+#embed "../assets/fonts/Inter-SemiBold.ttf"
+};
+const unsigned char inter_italic_ttf[] = {
+#embed "../assets/fonts/Inter-Italic.ttf"
+};
 
 struct VecFont {
     stbtt_fontinfo info{};
     double ascent = 0; // per px of font size
 };
 
-int nvg_font[4] = {-1, -1, -1, -1};
-VecFont vec_font[4];
+constexpr int n_fonts = 6;
+int nvg_font[n_fonts] = {-1, -1, -1, -1, -1, -1};
+VecFont vec_font[n_fonts];
 
 bool load(VecFont& f, const unsigned char* data) {
     if (!stbtt_InitFont(&f.info, data, stbtt_GetFontOffsetForIndex(data, 0))) {
@@ -155,11 +162,13 @@ bool init(NVGcontext* vg) {
         const char* name;
         const unsigned char* data;
         int size;
-    } fonts[4] = {{"hand", virgil_ttf, sizeof virgil_ttf},
-                  {"ui", inter_ttf, sizeof inter_ttf},
-                  {"ui-medium", inter_medium_ttf, sizeof inter_medium_ttf},
-                  {"mono", mono_ttf, sizeof mono_ttf}};
-    for (int i = 0; i < 4; ++i) {
+    } fonts[n_fonts] = {{"hand", virgil_ttf, sizeof virgil_ttf},
+                        {"ui", inter_ttf, sizeof inter_ttf},
+                        {"ui-medium", inter_medium_ttf, sizeof inter_medium_ttf},
+                        {"mono", mono_ttf, sizeof mono_ttf},
+                        {"ui-bold", inter_bold_ttf, sizeof inter_bold_ttf},
+                        {"ui-italic", inter_italic_ttf, sizeof inter_italic_ttf}};
+    for (int i = 0; i < n_fonts; ++i) {
         // freeData = 0: NanoVG only reads the static array.
         nvg_font[i] = nvgCreateFontMem(vg, fonts[i].name,
                                        const_cast<unsigned char*>(fonts[i].data),
@@ -169,7 +178,9 @@ bool init(NVGcontext* vg) {
         }
     }
     nvgAddFallbackFontId(vg, nvg_font[Hand], nvg_font[Ui]);
-    nvgAddFallbackFontId(vg, nvg_font[Mono], nvg_font[Ui]);
+    for (Font f : {Mono, UiBold, UiItalic}) {
+        nvgAddFallbackFontId(vg, nvg_font[f], nvg_font[Ui]);
+    }
     return true;
 }
 

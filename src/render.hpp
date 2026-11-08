@@ -17,6 +17,8 @@ struct RenderCtx {
     float pixel_ratio = 1;
     std::set<const Node*> faded; // e.g. nodes under the eraser
     double dt = 1 / 60.0;        // seconds since the last frame
+    const Node* editing = nullptr; // note being typed in: its caret line shows Markdown
+    size_t caret = 0;
     bool animating = false;      // out: a label is still moving
 };
 
@@ -49,9 +51,13 @@ TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t);
 struct CaretBox {
     double x, y, h;
 };
-CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos);
+// `raw_line`: for notes, the source line shown with its Markdown markers.
+CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos, int raw_line = -1);
+// Byte of the node's text nearest to a screen point (notes and code).
+size_t caret_at(NVGcontext* vg, const Node& n, Xform t, Vec2 p, int raw_line = -1);
 // The node's text as it is laid out on screen, line by line.
-std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t);
+std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t,
+                                     int raw_line = -1);
 
 // [[links]] in a line of text: byte ranges [begin, end) including brackets.
 std::vector<text::Span> link_spans(std::string_view line);
@@ -60,7 +66,8 @@ constexpr uint32_t link_color = 0x6965dbff;
 // Draws `node` and everything inside it that is visible.
 void draw_subtree(RenderCtx& ctx, const Node& node, Xform t);
 
-// Text node size (in parent units) from its content and font size.
-void fit_text_bounds(NVGcontext* vg, Node& n);
+// Text node height (in parent units) from its content, font size and page
+// width; a node without a width gets the default one.
+void fit_text_bounds(NVGcontext* vg, Node& n, int raw_line = -1);
 // Same for a Code node: the card grows to fit its longest line.
 void fit_code_bounds(NVGcontext* vg, Node& n);

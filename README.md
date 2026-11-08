@@ -45,6 +45,15 @@ The fonts are compiled into the binary, so after `install` you can run
 Tools: H hand, V/1 select, R/2 rectangle, D/3 diamond, O/4 ellipse,
 A/5 arrow, L/6 line, P/7 pen, T/8 text, 9 image/PDF, E/0 eraser.
 
+Notes read like Notion: Inter on a fixed page width (drag a note's side
+handles to change it) and Markdown that renders as you write: `#`/`##`/`###`
+headings, `-` bullets, `1.` numbered lists, `- [ ]` checkboxes (click to
+tick), `>` quotes, `---` dividers, `**bold**`, `*italic*`, `` `code` ``,
+`~~strike~~`. Markers show faintly only on the line you're typing in. Enter
+continues a list, Enter on an empty item ends it, Tab / Shift+Tab indent,
+Backspace at an item's start turns it back into text. Shape labels keep the
+hand-drawn font.
+
 Writing is vim: you start in Insert mode; Esc goes to Normal mode, Esc
 again (or a click elsewhere) finishes. Normal mode has h j k l w b e 0 ^ $
 gg G f F t T with counts, d c y with any motion (dd, cw, ciw, d$, 3dw…),
@@ -86,6 +95,6 @@ so there is no precision limit. See `App::reroot` in `src/app.cpp`.
 
 ## Licenses
 
-Fonts in `assets/fonts`: Virgil (Excalidraw's hand-drawn font), Inter and
-JetBrains Mono, all under the SIL Open Font License; see the license files
+Fonts in `assets/fonts`: Virgil (Excalidraw's hand-drawn font), Inter
+(regular, medium, semibold, italic) and JetBrains Mono, all under the SIL Open Font License; see the license files
 next to them.

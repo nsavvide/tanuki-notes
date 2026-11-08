@@ -1,6 +1,7 @@
 #include "render.hpp"
 
 #include "code.hpp"
+#include "note.hpp"
 #include "assets.hpp"
 #include "rough.hpp"
 
@@ -56,24 +57,15 @@ TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
     return L;
 }
 
-void fit_text_bounds(NVGcontext* vg, Node& n) {
-    // Measure in parent units directly: text width scales linearly.
+void fit_text_bounds(NVGcontext* vg, Node& n, int raw_line) {
     double fs = n.style.font_size;
-    double w = fs * 0.5;
-    int lines = 1;
-    size_t start = 0;
-    while (true) {
-        size_t nl = n.text.find('\n', start);
-        w = std::max(w, text::measure(vg, text::Hand,
-                                      n.text.substr(start, nl - start), fs));
-        if (nl == std::string::npos) {
-            break;
-        }
-        ++lines;
-        start = nl + 1;
+    if (fs <= 0) {
+        return;
     }
-    n.w = w + fs * 0.1;
-    n.h = lines * fs * text::line_height;
+    if (n.w <= 0) {
+        n.w = note::default_width * fs;
+    }
+    n.h = note::layout(vg, n.text, n.w / fs, raw_line)->height * fs;
 }
 
 // Code card layout, in multiples of the font size.
@@ -170,9 +162,14 @@ static void draw_code(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     nvgRestore(vg);
 }
 
-CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos) {
+CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos, int raw_line) {
     const std::string& s = n.text;
     pos = std::min(pos, s.size());
+    if (n.kind == Kind::Text && n.style.font_size > 0) {
+        double fs = n.style.font_size, px = fs * parent_scale(n, t);
+        auto c = note::layout(vg, s, n.w / fs, raw_line)->caret(vg, s, pos);
+        return {t.ox + c.x * px, t.oy + c.y * px, c.h * px};
+    }
     if (n.kind == Kind::Code) {
         Rect r = screen_rect(n, t);
         double px = n.style.font_size * parent_scale(n, t);
@@ -202,7 +199,56 @@ CaretBox caret_box(NVGcontext* vg, const Node& n, Xform t, size_t pos) {
     return {x, L.top + line * L.px * text::line_height, L.px * text::line_height};
 }
 
-std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t) {
+size_t caret_at(NVGcontext* vg, const Node& n, Xform t, Vec2 p, int raw_line) {
+    const std::string& s = n.text;
+    if (n.kind == Kind::Text && n.style.font_size > 0) {
+        double fs = n.style.font_size, px = fs * parent_scale(n, t);
+        return note::layout(vg, s, n.w / fs, raw_line)
+            ->hit(vg, s, (p.x - t.ox) / px, (p.y - t.oy) / px);
+    }
+    if (n.kind == Kind::Code) {
+        // Line from y, then the nearest column (tabs count as 4).
+        Rect r = screen_rect(n, t);
+        double px = n.style.font_size * parent_scale(n, t);
+        double adv = text::measure(vg, text::Mono, "M", px);
+        long line = std::max(0L, long((p.y - r.y - code_top * px) / (code_lh * px)));
+        size_t ls = 0;
+        for (long i = 0; i < line; ++i) {
+            size_t nl = s.find('\n', ls);
+            if (nl == std::string::npos) {
+                break;
+            }
+            ls = nl + 1;
+        }
+        size_t le = std::min(s.find('\n', ls), s.size());
+        double want = (p.x - r.x - code_pad * px) / adv;
+        size_t best = ls;
+        for (size_t i = ls; i <= le; ++i) {
+            if ((s[i] & 0xc0) == 0x80 && i < le) {
+                continue;
+            }
+            double col = double(codepoints(expand_tabs(std::string_view(s).substr(ls, i - ls))));
+            if (col <= want + 0.5) {
+                best = i;
+            }
+        }
+        return best;
+    }
+    return s.size();
+}
+
+std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t, int raw_line) {
+    if (n.kind == Kind::Text && n.style.font_size > 0) {
+        auto L = note::layout(vg, n.text, n.w / n.style.font_size, raw_line);
+        std::vector<text::Span> out(L->lines.size(), {std::string::npos, 0});
+        for (const auto& p : L->pieces) {
+            auto& sp = out[size_t(p.line)];
+            sp.begin = std::min(sp.begin, p.begin);
+            sp.end = std::max(sp.end, p.end);
+        }
+        std::erase_if(out, [](auto& sp) { return sp.begin == std::string::npos; });
+        return out;
+    }
     if (n.kind != Kind::Code) {
         return layout_text(vg, n, t).lines;
     }
@@ -215,9 +261,126 @@ std::vector<text::Span> screen_lines(NVGcontext* vg, const Node& n, Xform t) {
     return out;
 }
 
+// A Notion-style note: Markdown blocks and inline styles (see note.hpp).
+static void draw_note(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
+    NVGcontext* vg = ctx.vg;
+    double fs = n.style.font_size;
+    if (fs <= 0 || n.w <= 0) {
+        return;
+    }
+    double em = fs * parent_scale(n, t); // pixels per em
+    int raw = ctx.editing == &n ? note::line_of(n.text, ctx.caret) : -1;
+    auto L = note::layout(vg, n.text, n.w / fs, raw);
+    auto X = [&](double x) { return t.ox + x * em; };
+    auto Y = [&](double y) { return t.oy + y * em; };
+    NVGcolor ink = color(n.style.stroke, alpha);
+    NVGcolor faint = color(0x9b9a97ff, alpha);
+    NVGcolor accent = color(link_color, alpha);
+    auto rect = [&](double x, double y, double w, double h, NVGcolor c, double radius = 0) {
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, float(x), float(y), float(w), float(h), float(radius));
+        nvgFillColor(vg, c);
+        nvgFill(vg);
+    };
+
+    for (const auto& d : L->decos) {
+        double x = X(d.x), y = Y(d.y);
+        if (y > ctx.viewport.bottom() || y + d.h * em < ctx.viewport.y) {
+            continue;
+        }
+        switch (d.kind) {
+        case note::DecoKind::Bullet: {
+            double cx = x + 0.35 * em, cy = y + d.h * em / 2 + 0.07 * em, r = 0.15 * em;
+            nvgBeginPath(vg);
+            if (d.level % 3 == 2) {
+                nvgRect(vg, float(cx - r), float(cy - r), float(2 * r), float(2 * r));
+            } else {
+                nvgCircle(vg, float(cx), float(cy), float(r));
+            }
+            if (d.level % 3 == 1) {
+                nvgStrokeColor(vg, ink);
+                nvgStrokeWidth(vg, float(std::max(1.0, 0.07 * em)));
+                nvgStroke(vg);
+            } else {
+                nvgFillColor(vg, ink);
+                nvgFill(vg);
+            }
+            break;
+        }
+        case note::DecoKind::Number: {
+            double w = text::measure(vg, text::Ui, d.label, em);
+            text::draw_line(vg, text::Ui, d.label, x - w,
+                            y + (d.h - text::line_height) / 2 * em, em, ink, ctx.viewport);
+            break;
+        }
+        case note::DecoKind::Checkbox: {
+            double s = d.w * em;
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, float(x), float(y), float(s), float(s), float(0.15 * em));
+            if (d.checked) {
+                nvgFillColor(vg, color(0x2383e2ff, alpha));
+                nvgFill(vg);
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, float(x + s * 0.24), float(y + s * 0.52));
+                nvgLineTo(vg, float(x + s * 0.42), float(y + s * 0.7));
+                nvgLineTo(vg, float(x + s * 0.76), float(y + s * 0.32));
+                nvgStrokeColor(vg, nvgRGBAf(1, 1, 1, alpha));
+                nvgStrokeWidth(vg, float(std::max(1.0, 0.11 * em)));
+                nvgLineCap(vg, NVG_ROUND);
+                nvgStroke(vg);
+            } else {
+                nvgStrokeColor(vg, ink);
+                nvgStrokeWidth(vg, float(std::max(1.0, 0.08 * em)));
+                nvgStroke(vg);
+            }
+            break;
+        }
+        case note::DecoKind::Quote:
+            rect(x, y, d.w * em, d.h * em, ink);
+            break;
+        case note::DecoKind::Divider:
+            rect(x, y, d.w * em, std::max(1.0, 0.06 * em), color(0xe3e2e0ff, alpha));
+            break;
+        }
+    }
+
+    for (const auto& p : L->pieces) {
+        if (p.flags & note::Hidden || p.w <= 0) {
+            continue;
+        }
+        const note::Line& line = L->lines[size_t(p.line)];
+        double ly = Y(line.y), lh = line.h * em, size = p.size * em;
+        if (ly > ctx.viewport.bottom() || ly + lh < ctx.viewport.y) {
+            continue;
+        }
+        double x = X(p.x), w = p.w * em;
+        double top = ly + (lh - size * text::line_height) / 2;
+        NVGcolor c = p.flags & (note::Marker | note::Done) ? faint
+                   : p.flags & note::Link                 ? accent
+                   : p.flags & note::Code                 ? color(0xeb5757ff, alpha)
+                                                          : ink;
+        if (p.flags & note::Code && !(p.flags & note::Marker)) {
+            rect(x - 0.12 * size, top + 0.05 * size, w + 0.24 * size, size * 1.15,
+                 color(0xf1f1efff, alpha), 0.2 * size);
+        }
+        std::string str = n.text.substr(p.begin, p.end - p.begin);
+        text::draw_line(vg, note::font(p.flags), str, x, top, size, c, ctx.viewport);
+        if (size >= 3 && p.flags & (note::Strike | note::Done)) {
+            rect(x, top + size * 0.72, w, std::max(1.0, size / 16), c);
+        }
+        if (size >= 3 && p.flags & note::Link) {
+            rect(x, top + size * 1.17, w, std::max(1.0, size / 18), nvgTransRGBAf(c, 0.5f));
+        }
+    }
+}
+
 static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     if (n.kind == Kind::Code) {
         return; // its text is the code itself
+    }
+    if (n.kind == Kind::Text) {
+        draw_note(ctx, n, t, alpha);
+        return;
     }
     double target = title_target(n);
     if (n.title_k < 0) {

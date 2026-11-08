@@ -35,6 +35,9 @@ std::unique_ptr<Node> make_node(Kind kind) {
     n->id = new_id();
     n->kind = kind;
     n->seed = uint32_t(std::hash<std::string>{}(n->id)) | 1u;
+    if (kind == Kind::Text) {
+        n->w = 0; // fit_text_bounds gives it the default page width
+    }
     return n;
 }
 

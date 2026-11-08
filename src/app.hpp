@@ -103,6 +103,8 @@ class App {
 
     void edit_selected();
     void refit_editing();
+    // The note line being typed in shows its Markdown; -1 when not a note.
+    int raw_line() const;
     void split_fences(Node& n); // ```lang ... ``` in finished text -> code blocks
 
     // [[links]] between notes, by title.
@@ -228,6 +230,11 @@ class App {
 
     std::string came_from_id_; // shape selected by zooming out of it
     std::string code_lang_ = "cpp";
+    bool auto_color_ = true; // new shapes get their own color
+
+    // Gives a shape a light fill and dark outline in a hue its siblings and
+    // parent don't use yet.
+    void auto_color(Node& n);
 
     bool search_open_ = false;
     std::string search_query_;

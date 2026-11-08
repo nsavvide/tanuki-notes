@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "code.hpp"
+#include "note.hpp"
 #include "render.hpp"
 #include "rough.hpp"
 #include "store.hpp"
@@ -185,7 +186,18 @@ bool is_shape_tool(Tool t) {
 App::App(NVGcontext* vg, SDL_Window* window, fs::path map_dir)
     : vg_(vg), window_(window), dir_(std::move(map_dir)), assets_(vg, dir_) {
     fs::create_directories(dir_);
+    style_.fill_style = FillStyle::Solid; // calmer under auto colors
     root_ = store::load(dir_);
+    // Note heights follow the current layout (older maps used another font).
+    std::function<void(Node&)> refit = [&](Node& n) {
+        if (n.kind == Kind::Text) {
+            fit_text_bounds(vg_, n);
+        }
+        for (auto& c : n.children) {
+            refit(*c);
+        }
+    };
+    refit(*root_);
     anchor_ = root_.get();
     SDL_GetWindowSize(window_, &win_w_, &win_h_);
 
@@ -582,6 +594,28 @@ void App::place_new_node(Node& parent, Node& n, Rect r) {
     n.h = r.h / tp->s;
 }
 
+void App::auto_color(Node& n) {
+    int used[ui::n_hues] = {};
+    for (const auto& c : n.parent->children) {
+        if (c.get() != &n) {
+            if (int h = ui::hue_of(c->style.fill); h >= 0) {
+                ++used[h];
+            }
+        }
+    }
+    if (int ph = ui::hue_of(n.parent->style.fill); ph >= 0) {
+        used[ph] += 1000; // never the parent's own color
+    }
+    int best = ui::auto_order[0];
+    for (int h : ui::auto_order) {
+        if (used[h] < used[best]) {
+            best = h;
+        }
+    }
+    n.style.fill = ui::shade(best, ui::auto_fill_shade);
+    n.style.stroke = ui::shade(best, ui::auto_stroke_shade);
+}
+
 void App::start_create(Vec2 p, Mods) {
     Node* parent = container_at(p, nullptr);
     auto tp = xform_of(parent);
@@ -600,6 +634,10 @@ void App::start_create(Vec2 p, Mods) {
     node->y = create_start_local_.y;
     node->w = node->h = 1 / tp->s;
     creating_ = &add_child(*parent, std::move(node));
+    if (auto_color_ && (creating_->kind == Kind::Rect || creating_->kind == Kind::Ellipse ||
+                        creating_->kind == Kind::Diamond)) {
+        auto_color(*creating_);
+    }
     if (creating_->is_linear()) {
         draw_local_ = {create_start_local_};
         set_linear_points(*creating_, {create_start_local_, create_start_local_});
@@ -690,6 +728,9 @@ void App::start_text_edit(Node& n, bool) {
         auto tp = xform_of(n.parent);
         n.style.font_size = font_px_ / (tp ? tp->s : 1);
     }
+    if (n.kind == Kind::Text && n.w < 12 * n.style.font_size) {
+        n.w = note::default_width * n.style.font_size; // notes from before page width
+    }
     editing_ = &n;
     caret_ = n.text.size();
     vim_.begin(n.text, caret_);
@@ -707,6 +748,9 @@ void App::finish_text_edit() {
     SDL_StopTextInput(window_);
     if (n->kind != Kind::Code) {
         split_fences(*n);
+    }
+    if (n->kind == Kind::Text) {
+        fit_text_bounds(vg_, *n);
     }
     bool blank = n->text.find_first_not_of(" \n\t") == std::string::npos;
     if (n->kind == Kind::Text && blank) {
@@ -998,9 +1042,14 @@ void App::insert_file(const std::string& path, Vec2 center) {
 
 // ---------------------------------------------------------------- editing
 
+int App::raw_line() const {
+    return editing_ && editing_->kind == Kind::Text ? note::line_of(editing_->text, caret_)
+                                                    : -1;
+}
+
 void App::refit_editing() {
     if (editing_ && editing_->kind == Kind::Text) {
-        fit_text_bounds(vg_, *editing_);
+        fit_text_bounds(vg_, *editing_, raw_line());
     } else if (editing_ && editing_->kind == Kind::Code) {
         fit_code_bounds(vg_, *editing_);
     }
@@ -1163,6 +1212,21 @@ std::optional<std::string> App::link_at(Vec2 p) {
     if (!t || n->kind == Kind::Code || n->text.find("[[") == std::string::npos) {
         return std::nullopt;
     }
+    if (n->kind == Kind::Text) {
+        double em = n->style.font_size * t->s / n->w;
+        auto L = note::layout(vg_, n->text, n->w / n->style.font_size, -1);
+        for (const auto& pc : L->pieces) {
+            const note::Line& line = L->lines[size_t(pc.line)];
+            Rect r{t->ox + pc.x * em, t->oy + line.y * em, pc.w * em, line.h * em};
+            if (pc.flags & note::Link && r.contains(p)) {
+                size_t a = n->text.rfind("[[", pc.begin), b = n->text.find("]]", pc.begin);
+                if (a != std::string::npos && b != std::string::npos) {
+                    return n->text.substr(a + 2, b - a - 2);
+                }
+            }
+        }
+        return std::nullopt;
+    }
     TextLayout L = layout_text(vg_, *n, *t);
     for (size_t i = 0; i < L.lines.size(); ++i) {
         std::string line = n->text.substr(L.lines[i].begin, L.lines[i].end - L.lines[i].begin);
@@ -1278,7 +1342,7 @@ void App::draw_link_popup() {
         return;
     }
     link_sel_ = std::clamp(link_sel_, 0, int(matches.size()) - 1);
-    CaretBox c = caret_box(vg_, *editing_, *t, caret_);
+    CaretBox c = caret_box(vg_, *editing_, *t, caret_, raw_line());
     double w = 280, row = 30;
     Rect panel{std::clamp(c.x, 8.0, win_w_ - w - 8), c.y + c.h + 6, w,
                8 + matches.size() * row};
@@ -1699,7 +1763,19 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
     if (editing_) {
         auto r = screen_rect_of(editing_);
         if (r && r->expanded(4).contains(p)) {
-            return; // click inside the text being edited
+            // Click in the text being edited: put the caret there.
+            if (auto t = xform_of(editing_);
+                t && (editing_->kind == Kind::Text || editing_->kind == Kind::Code)) {
+                caret_ = caret_at(vg_, *editing_, *t, p, raw_line());
+                const std::string& s = editing_->text;
+                if (vim_.mode != vim::Mode::Insert && caret_ > 0 &&
+                    (caret_ == s.size() || s[caret_] == '\n') &&
+                    s[caret_ - 1] != '\n') {
+                    caret_ = prev_cp(s, caret_); // Normal mode sits on a character
+                }
+                caret_blink_start_ = now_;
+            }
+            return;
         }
         finish_text_edit();
         if (tool_ == Tool::Select) {
@@ -1768,6 +1844,23 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
             fly_to(box);
         }
         return;
+    }
+
+    // A click on a checkbox in a note ticks it.
+    if (!editing_ && clicks == 1 && hit && hit->kind == Kind::Text) {
+        if (auto t = xform_of(hit)) {
+            double em = hit->style.font_size * t->s / hit->w;
+            auto L = note::layout(vg_, hit->text, hit->w / hit->style.font_size, -1);
+            for (const auto& d : L->decos) {
+                Rect box{t->ox + d.x * em, t->oy + d.y * em, d.w * em, d.h * em};
+                if (d.kind == note::DecoKind::Checkbox && box.expanded(3).contains(p) &&
+                    d.pos + 1 < hit->text.size()) {
+                    hit->text[d.pos + 1] = d.checked ? ' ' : 'x';
+                    commit();
+                    return;
+                }
+            }
+        }
     }
 
     // A click on a [[link]] follows it, unless a second click turns it into
@@ -1870,8 +1963,9 @@ void App::mouse_move(Vec2 p, Mods m) {
         Vec2 dd = p - drag_start_;
         double l = o.x + (L ? dd.x : 0), r = o.right() + (R ? dd.x : 0);
         double t = o.y + (T ? dd.y : 0), b = o.bottom() + (B ? dd.y : 0);
-        bool keep = m.shift || n->kind == Kind::Text || n->kind == Kind::Image ||
-                    n->kind == Kind::Pdf || n->kind == Kind::Code;
+        bool side = (h == 3 || h == 7) && n->kind == Kind::Text; // note width
+        bool keep = !side && (m.shift || n->kind == Kind::Text || n->kind == Kind::Image ||
+                              n->kind == Kind::Pdf || n->kind == Kind::Code);
         if (keep) {
             double sx = (r - l) / o.w, sy = (b - t) / o.h;
             double k = (L || R) && (T || B) ? std::max(sx, sy) : (L || R) ? sx : sy;
@@ -1889,8 +1983,12 @@ void App::mouse_move(Vec2 p, Mods m) {
         n->y = (nr.y - tp->oy) / tp->s;
         n->w = nr.w / tp->s;
         n->h = nr.h / tp->s;
-        if (n->kind == Kind::Text || n->kind == Kind::Code) {
+        if ((n->kind == Kind::Text && !side) || n->kind == Kind::Code) {
             n->style.font_size = resize_orig_font_ * nr.h / o.h;
+        }
+        if (n->kind == Kind::Text) {
+            n->w = std::max(n->w, 4 * n->style.font_size);
+            fit_text_bounds(vg_, *n, n == editing_ ? raw_line() : -1);
         }
         moved_ = true;
         break;
@@ -2143,6 +2241,20 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 s.insert(caret_, "    ");
                 caret_ += 4;
                 refit();
+            } else if (editing_->kind == Kind::Text) {
+                // Indent or outdent a list item.
+                size_t ls = line_start(s, caret_);
+                if (note::list_item(s, ls).marker_len) {
+                    if (!m.shift) {
+                        s.insert(ls, "  ");
+                        caret_ += 2;
+                    } else {
+                        size_t n = std::min<size_t>(2, s.find_first_not_of(' ', ls) - ls);
+                        s.erase(ls, n);
+                        caret_ -= std::min(caret_ - ls, n);
+                    }
+                    refit();
+                }
             }
             return;
         case SDLK_RETURN:
@@ -2168,6 +2280,23 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 close_code_block();
                 return;
             }
+            // Lists continue on Enter; Enter on an empty item ends the list.
+            if (editing_->kind == Kind::Text) {
+                note::ListItem it = note::list_item(s, ls);
+                size_t le2 = std::min(s.find('\n', ls), s.size());
+                if (it.marker_len && le2 == ls + it.marker_len && caret_ == le2) {
+                    s.erase(ls, it.marker_len);
+                    caret_ = ls;
+                    refit();
+                    return;
+                }
+                if (it.marker_len && caret_ >= ls + it.marker_len) {
+                    s.insert(caret_, "\n" + it.next);
+                    caret_ += 1 + it.next.size();
+                    refit();
+                    return;
+                }
+            }
             // Code keeps the indentation of the line above.
             std::string indent = editing_->kind == Kind::Code
                                      ? line.substr(0, a == std::string::npos ? line.size() : a)
@@ -2178,6 +2307,17 @@ void App::key_down(SDL_Keycode key, Mods m) {
             return;
         }
         case SDLK_BACKSPACE: {
+            // At the start of a list item, Backspace turns it back into text.
+            if (editing_->kind == Kind::Text) {
+                size_t ls = line_start(s, caret_);
+                note::ListItem it = note::list_item(s, ls);
+                if (it.marker_len && caret_ == ls + it.marker_len) {
+                    s.erase(ls, it.marker_len);
+                    caret_ = ls;
+                    refit();
+                    return;
+                }
+            }
             size_t p = prev_cp(s, caret_);
             s.erase(p, caret_ - p);
             caret_ = p;
@@ -2422,6 +2562,7 @@ void App::update(double now, int win_w, int win_h) {
         pending_link_.clear();
         follow_link(title);
     }
+    refit_editing();
     step_fly(dt);
     clamp_zoom();
     reroot();
@@ -2441,6 +2582,8 @@ void App::render(float pixel_ratio) {
 
     RenderCtx ctx{vg_, assets_, {0, 0, double(win_w_), double(win_h_)}, pixel_ratio, {}};
     ctx.dt = frame_dt_;
+    ctx.editing = editing_;
+    ctx.caret = caret_;
     for (Node* n : erasing_) {
         ctx.faded.insert(n);
     }
@@ -2555,10 +2698,11 @@ void App::draw_overlay() {
     if (editing_) {
         if (auto t = xform_of(editing_)) {
             const std::string& s = editing_->text;
-            auto box = [&](size_t pos) { return caret_box(vg, *editing_, *t, pos); };
+            int raw = raw_line();
+            auto box = [&](size_t pos) { return caret_box(vg, *editing_, *t, pos, raw); };
             if (vim_.mode == vim::Mode::Visual || vim_.mode == vim::Mode::VisualLine) {
                 auto [a, b] = vim_.selection(s, caret_);
-                for (const auto& span : screen_lines(vg, *editing_, *t)) {
+                for (const auto& span : screen_lines(vg, *editing_, *t, raw)) {
                     size_t sa = std::max(a, span.begin), sb = std::min(b, span.end);
                     bool newline = b > span.end && a <= span.end && span.end < s.size();
                     if (sa >= sb && !newline) {
@@ -2696,9 +2840,11 @@ void App::draw_style_panel() {
                      n->kind == Kind::Diamond;
     }
 
-    double x = 16, y = 72, w = 204;
-    double rows = 3 + (has_shape ? 2 : 0) + (has_text ? 1 : 0) + (first ? 1 : 0);
-    double h = 16 + rows * 58;
+    // Sections are 58 px tall, except the color grids.
+    constexpr double stroke_h = 18 + 28 + 2 * 17 + 12, bg_h = 18 + 28 + 3 * 17 + 12;
+    double x = 16, y = 72, w = 236;
+    double rows = 2 + (has_shape ? 1 : 0) + (has_text ? 1 : 0) + (first ? 1 : 0);
+    double h = 16 + rows * 58 + stroke_h + (has_shape ? bg_h : 0);
     ui::island(vg, {x, y, w, h});
     add_hit({x, y, w, h}, nullptr);
 
@@ -2712,24 +2858,63 @@ void App::draw_style_panel() {
         apply_to_selection([&](Node& n) { f(n.style); });
     };
 
+    // Picking a color with nothing selected means "use this, not auto".
+    auto pick = [this, set_style](bool is_fill, uint32_t c) {
+        if (selection_.empty()) {
+            auto_color_ = false;
+        }
+        set_style([=](Style& s) { (is_fill ? s.fill : s.stroke) = c; });
+    };
+    // One row of fixed swatches, then a hue x shade grid.
+    auto palette = [&](bool is_fill, uint32_t current, std::initializer_list<uint32_t> fixed,
+                       std::initializer_list<int> shades) {
+        double fx = cx;
+        if (is_fill) { // the Auto chip
+            Rect r{fx, cy, 46, 22};
+            bool on = auto_color_;
+            ui::button_bg(vg, r, on, r.contains(mouse_));
+            ui::label(vg, "Auto", r.center().x, r.center().y, 12,
+                      ui::rgb(on ? ui::primary : ui::ink), true,
+                      NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            add_hit(r, [this] {
+                auto_color_ = true;
+                // Fresh colors for the selected shapes, one at a time.
+                for (Node* n : selection_) {
+                    if (n->kind == Kind::Rect || n->kind == Kind::Ellipse ||
+                        n->kind == Kind::Diamond) {
+                        n->style.fill = 0;
+                        auto_color(*n);
+                    }
+                }
+                commit();
+            });
+            fx += 54;
+        }
+        for (uint32_t c : fixed) {
+            Rect r{fx, cy, 22, 22};
+            ui::swatch(vg, r, c, current == c);
+            add_hit(r, [=] { pick(is_fill, c); });
+            fx += 28;
+        }
+        cy += 28;
+        for (int k : shades) {
+            for (int hh = 0; hh < ui::n_hues; ++hh) {
+                Rect r{cx + hh * 17, cy, 15, 15};
+                uint32_t c = ui::shade(hh, k);
+                ui::swatch(vg, r, c, current == c);
+                add_hit(r, [=] { pick(is_fill, c); });
+            }
+            cy += 17;
+        }
+        cy += 12;
+    };
+
     section("Stroke");
-    for (int i = 0; i < 5; ++i) {
-        Rect r{cx + i * 32, cy, 26, 26};
-        uint32_t c = ui::stroke_colors[i];
-        ui::swatch(vg, r, c, stroke == c);
-        add_hit(r, [=] { set_style([c](Style& s) { s.stroke = c; }); });
-    }
-    cy += 40;
+    palette(false, stroke, {0x1e1e1eff, 0x868e96ff, 0xffffffff}, {3, 4});
 
     if (has_shape) {
         section("Background");
-        for (int i = 0; i < 5; ++i) {
-            Rect r{cx + i * 32, cy, 26, 26};
-            uint32_t c = ui::fill_colors[i];
-            ui::swatch(vg, r, c, fill == c);
-            add_hit(r, [=] { set_style([c](Style& s) { s.fill = c; }); });
-        }
-        cy += 40;
+        palette(true, fill, {0x00000000, 0xffffffff, 0xf1f3f5ff}, {0, 1, 2});
         section("Fill");
         ui::Icon fills[3] = {ui::Icon::Hachure, ui::Icon::CrossHatch, ui::Icon::Solid};
         for (int i = 0; i < 3; ++i) {

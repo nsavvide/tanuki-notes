@@ -13,7 +13,7 @@
 
 namespace text {
 
-enum Font { Hand, Ui, UiMedium, Mono };
+enum Font { Hand, Ui, UiMedium, Mono, UiBold, UiItalic };
 
 constexpr double line_height = 1.25; // times font size, like Excalidraw
 
