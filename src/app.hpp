@@ -99,6 +99,7 @@ class App {
     // Arrows and lines attached to shapes.
     Node* bind_target_at(Vec2 p, const Node* exclude);
     void bind_endpoints(Node& n);
+    std::vector<Vec2> bend_handles(const Node& n, Xform t) const;
     void update_bindings();
 
     void edit_selected();

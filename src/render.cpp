@@ -24,6 +24,27 @@ std::vector<Vec2> screen_points(const Node& n, Xform t) {
     return out;
 }
 
+std::vector<Vec2> path_points(const Node& n, Xform t) {
+    auto c = screen_points(n, t);
+    if (n.kind == Kind::Draw || c.size() < 3) {
+        return c;
+    }
+    // Catmull-Rom through the points: an arrow with a middle point bends
+    // smoothly through it.
+    std::vector<Vec2> out;
+    for (size_t i = 0; i + 1 < c.size(); ++i) {
+        Vec2 p0 = c[i ? i - 1 : 0], p1 = c[i], p2 = c[i + 1];
+        Vec2 p3 = c[std::min(i + 2, c.size() - 1)];
+        for (int k = 0; k < curve_steps; ++k) {
+            double u = double(k) / curve_steps, u2 = u * u, u3 = u2 * u;
+            out.push_back((p1 * 2 + (p2 - p0) * u + (p0 * 2 - p1 * 5 + p2 * 4 - p3) * u2 +
+                           (p1 * 3 - p0 - p2 * 3 + p3) * u3) * 0.5);
+        }
+    }
+    out.push_back(c.back());
+    return out;
+}
+
 static double title_target(const Node& n) {
     return !n.children.empty() || n.kind == Kind::Pdf ? 1 : 0;
 }
@@ -57,7 +78,7 @@ TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
     if (n.is_linear()) {
         // Arrow and line labels sit centered on the middle of the path.
         L.lines = text::wrap(vg, text::Hand, n.text, L.px, L.px * 16);
-        auto pts = screen_points(n, t);
+        auto pts = path_points(n, t);
         Vec2 mid = r.center();
         double total = 0;
         for (size_t i = 1; i < pts.size(); ++i) {
@@ -581,16 +602,25 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     }
     case Kind::Line:
     case Kind::Arrow: {
-        auto pts = screen_points(n, t);
+        auto pts = path_points(n, t);
         if (pts.size() < 2) {
             break;
         }
         nvgBeginPath(vg);
-        for (size_t i = 0; i + 1 < pts.size(); ++i) {
-            rough::line(vg, pts[i], pts[i + 1], o, rng);
+        if (n.points.size() > 2) { // a curve: drawn smooth, rough would kink it
+            nvgMoveTo(vg, float(pts[0].x), float(pts[0].y));
+            for (size_t i = 1; i < pts.size(); ++i) {
+                nvgLineTo(vg, float(pts[i].x), float(pts[i].y));
+            }
+        } else {
+            for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                rough::line(vg, pts[i], pts[i + 1], o, rng);
+            }
         }
         if (n.kind == Kind::Arrow) {
-            Vec2 tip = pts.back(), from = pts[pts.size() - 2];
+            // On a curve, aim along the last bit of it, not one tiny sample.
+            Vec2 tip = pts.back();
+            Vec2 from = pts[pts.size() - 1 - (n.points.size() > 2 ? curve_steps / 4 : 1)];
             Vec2 d = tip - from;
             double len = length(d);
             if (len > 0) {
@@ -689,7 +719,7 @@ void draw_subtree(RenderCtx& ctx, const Node& n, Xform t) {
     // Culling: children sit inside (and are clipped to) their parent, so an
     // invisible node hides its whole subtree.
     if (n.kind != Kind::Root &&
-        (!ctx.viewport.intersects(r.expanded(sw + 2)) ||
+        (!ctx.viewport.intersects(r.expanded(sw + 2 + bulge(n, r))) ||
          (r.w < 1 && r.h < 1))) {
         return;
     }

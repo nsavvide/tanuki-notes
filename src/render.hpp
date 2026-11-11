@@ -37,6 +37,15 @@ inline double parent_scale(const Node& n, Xform t) { return t.s / n.w; }
 
 // Points of a Line/Arrow/Draw node on screen.
 std::vector<Vec2> screen_points(const Node& n, Xform t);
+// Line/Arrow as drawn: through its points, curved when it has more than two
+// (curve_steps samples per segment). Other kinds: screen_points.
+constexpr int curve_steps = 16;
+// How far a curve can swing past the box around its points.
+inline double bulge(const Node& n, Rect r) {
+    return n.is_linear() && n.kind != Kind::Draw && n.points.size() > 2
+               ? 0.2 * std::max(r.w, r.h) : 0;
+}
+std::vector<Vec2> path_points(const Node& n, Xform t);
 
 // Text layout shared by drawing and the text caret.
 struct TextLayout {

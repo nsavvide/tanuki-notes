@@ -738,6 +738,22 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         TextLayout lt = layout_text(vg, *arrow, *app.xform_of(arrow));
         CHECK(std::abs(lt.top + lt.px * text::line_height / 2 - amid.y) < 2);
         CHECK(app.pick({lt.line_x[0] + 3, lt.top + 3}) == arrow);
+
+        // Dragging the middle handle bends the arrow into a curve...
+        app.selection_ = {arrow};
+        tick(app);
+        Vec2 bend = app.bend_handles(*arrow, *app.xform_of(arrow))[0];
+        drag(app, bend, bend + Vec2{0, -120});
+        CHECK(arrow->points.size() == 3);
+        auto curve = path_points(*arrow, *app.xform_of(arrow));
+        CHECK(curve.size() > 3);
+        Vec2 top = screen_points(*arrow, *app.xform_of(arrow))[1];
+        CHECK(std::abs(top.y - (bend.y - 120)) < 2);
+        CHECK(app.pick(curve[curve.size() / 4]) == arrow); // clicks on the curve hit
+        // ...and dragging it back onto the straight line removes the bend.
+        auto ends = screen_points(*arrow, *app.xform_of(arrow));
+        drag(app, top, (ends.front() + ends.back()) * 0.5);
+        CHECK(arrow->points.size() == 2);
     }
     fs::remove_all(dir2);
 

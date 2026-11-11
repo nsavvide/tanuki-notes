@@ -459,7 +459,7 @@ bool App::hit_self(const Node& n, Xform t, Vec2 p) const {
     case Kind::Line:
     case Kind::Arrow:
     case Kind::Draw: {
-        auto pts = screen_points(n, t);
+        auto pts = path_points(n, t);
         if (pts.size() == 1) {
             return length(p - pts[0]) <= tol;
         }
@@ -483,7 +483,7 @@ Node* App::pick_in(Node& n, Xform t, Vec2 p) {
     double label = n.text.empty() || n.kind == Kind::Text ? 0
                    : n.style.font_size * parent_scale(n, t) * (n.is_linear() ? 8 : 1.5);
     if (n.kind != Kind::Root &&
-        (!r.expanded(std::max({8.0, sw, label})).contains(p) || (r.w < 2 && r.h < 2))) {
+        (!r.expanded(std::max({8.0, sw, label, bulge(n, r)})).contains(p) || (r.w < 2 && r.h < 2))) {
         return nullptr;
     }
     // Topmost first: later siblings, and children above their parent.
@@ -1493,6 +1493,18 @@ Node* App::bind_target_at(Vec2 p, const Node* exclude) {
     return best;
 }
 
+// Where to grab a Line/Arrow to bend it: halfway along each segment.
+std::vector<Vec2> App::bend_handles(const Node& n, Xform t) const {
+    auto path = path_points(n, t);
+    std::vector<Vec2> out;
+    size_t segs = n.points.size() - 1, step = n.points.size() > 2 ? curve_steps : 1;
+    for (size_t i = 0; i < segs; ++i) {
+        out.push_back(step > 1 ? path[i * step + step / 2]
+                               : (path[i] + path[i + 1]) * 0.5);
+    }
+    return out;
+}
+
 void App::bind_endpoints(Node& n) {
     if (n.kind != Kind::Arrow && n.kind != Kind::Line) {
         return;
@@ -1892,10 +1904,22 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
         auto t = xform_of(n);
         if (t && (n->kind == Kind::Line || n->kind == Kind::Arrow)) {
             auto pts = screen_points(*n, *t);
-            for (int i : {0, int(pts.size()) - 1}) {
+            for (int i = 0; i < int(pts.size()); ++i) {
                 if (length(p - pts[i]) <= 8) {
                     drag_ = Drag::Endpoint;
                     resize_handle_ = i;
+                    return;
+                }
+            }
+            // A midpoint handle: dragging it adds a point there and bends.
+            auto mids = bend_handles(*n, *t);
+            for (int i = 0; i < int(mids.size()); ++i) {
+                if (length(p - mids[i]) <= 8) {
+                    auto local = linear_local_points(*n);
+                    local.insert(local.begin() + i + 1, xform_of(n->parent)->to_local(mids[i]));
+                    set_linear_points(*n, local);
+                    drag_ = Drag::Endpoint;
+                    resize_handle_ = i + 1;
                     return;
                 }
             }
@@ -2097,7 +2121,19 @@ void App::mouse_up(Vec2 p, int button, Mods) {
         break;
     case Drag::Endpoint:
         if (moved_ && !selection_.empty()) {
-            bind_endpoints(*selection_[0]);
+            // A middle point dragged back onto the straight line goes away.
+            Node* n = selection_[0];
+            if (auto t = xform_of(n); t && resize_handle_ > 0 &&
+                                      resize_handle_ + 1 < int(n->points.size())) {
+                auto pts = screen_points(*n, *t);
+                size_t i = size_t(resize_handle_);
+                if (dist_to_segment(pts[i], pts[i - 1], pts[i + 1]) < 6) {
+                    auto local = linear_local_points(*n);
+                    local.erase(local.begin() + long(i));
+                    set_linear_points(*n, local);
+                }
+            }
+            bind_endpoints(*n);
             commit();
         }
         break;
@@ -2684,6 +2720,14 @@ void App::draw_overlay() {
                 nvgFill(vg);
                 nvgStrokeColor(vg, accent);
                 nvgStroke(vg);
+            }
+            if (n->kind != Kind::Draw) {
+                for (Vec2 p : bend_handles(*n, *t)) {
+                    nvgBeginPath(vg);
+                    nvgCircle(vg, float(p.x), float(p.y), 3.5f);
+                    nvgFillColor(vg, ui::rgb(ui::primary, 90));
+                    nvgFill(vg);
+                }
             }
             continue;
         }

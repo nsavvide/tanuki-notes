@@ -38,6 +38,7 @@ folder or `/` into a map.
 | Detach an arrow | drag its end off the shape, or move the arrow by itself |
 | Label a shape / edit text | double-click the label (or a blank new shape), or Enter on a selected note. Once a shape has things inside, its label becomes a title just above it |
 | Label an arrow or line | double-click it (or select it and press Enter) |
+| Curve an arrow or line | select it and drag the small dot halfway along; drag a bend back straight to remove it |
 | New text | double-click the background, or T |
 | Insert image or PDF | 9, drag and drop a file, or paste an image |
 | Move into / out of a shape | drag it inside or outside another shape |
