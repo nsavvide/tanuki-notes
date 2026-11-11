@@ -757,6 +757,54 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
     }
     fs::remove_all(dir2);
 
+    // Arrow ends dropped near an outline pin to that exact spot.
+    fs::remove_all(dir2);
+    {
+        App app(vg, window, dir2);
+        tick(app);
+        app.set_tool(Tool::Rect);
+        drag(app, {100, 100}, {300, 300});
+        app.set_tool(Tool::Rect);
+        drag(app, {700, 100}, {900, 300});
+        Node* b = app.root().children[1].get();
+        app.set_tool(Tool::Arrow);
+        drag(app, {295, 120}, {705, 280});
+        Node* arrow = app.root().children[2].get();
+        CHECK(near(arrow->start_at.x, 1) && std::abs(arrow->start_at.y - 0.1) < 0.01);
+        CHECK(near(arrow->end_at.x, 0) && std::abs(arrow->end_at.y - 0.9) < 0.01);
+        tick(app);
+        auto pts = screen_points(*arrow, *app.xform_of(arrow));
+        CHECK(std::abs(pts.front().y - 120) < 1 && pts.front().x > 300 && pts.front().x < 310);
+        CHECK(std::abs(pts.back().y - 280) < 1 && pts.back().x < 700 && pts.back().x > 690);
+        // The pin moves with its shape.
+        click(app, {1200, 700});
+        drag(app, {800, 101}, {800, 201});
+        tick(app);
+        pts = screen_points(*arrow, *app.xform_of(arrow));
+        CHECK(std::abs(pts.back().y - 380) < 1);
+        // Dragging a bound end follows the mouse (no snapping back), and it
+        // snaps to an edge midpoint when dropped near one.
+        app.selection_ = {arrow};
+        tick(app);
+        app.mouse_down(pts.back(), SDL_BUTTON_LEFT, 1, {});
+        app.mouse_move({600, 500}, {});
+        tick(app);
+        CHECK(length(screen_points(*arrow, *app.xform_of(arrow)).back() - Vec2{600, 500}) < 1);
+        app.mouse_move({806, 398}, {});
+        app.mouse_up({806, 398}, SDL_BUTTON_LEFT, {});
+        tick(app);
+        CHECK(arrow->end_bind == b->id && near(arrow->end_at.x, 0.5) && near(arrow->end_at.y, 1));
+        // Survives save/load.
+        app.flush();
+        auto loaded = store::load(dir2);
+        CHECK(near(loaded->children[2]->end_at.y, 1));
+        // Dropped deep inside: no pin, aims at the center.
+        app.set_tool(Tool::Arrow);
+        drag(app, {200, 200}, {500, 600});
+        CHECK(app.root().children[3]->start_at.x < 0);
+    }
+    fs::remove_all(dir2);
+
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);
         return 1;

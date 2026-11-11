@@ -125,6 +125,57 @@ std::optional<Vec2> boundary_point(const Node& n, Rect r, Vec2 toward, double ga
     return c + d * t + d * (gap / len);
 }
 
+// Edge midpoints (top, right, bottom, left): ends snap to these.
+std::array<Vec2, 4> edge_mids(Rect r) {
+    Vec2 c = r.center();
+    return {{{c.x, r.y}, {r.right(), c.y}, {c.x, r.bottom()}, {r.x, c.y}}};
+}
+
+// The point on the shape's outline nearest to `p`, and which way is out.
+std::pair<Vec2, Vec2> outline_point(const Node& n, Rect r, Vec2 p) {
+    Vec2 c = r.center();
+    if (n.kind == Kind::Ellipse || n.kind == Kind::Diamond) {
+        Vec2 d = p - c;
+        if (length(d) < 1e-9) {
+            d = {0, -1};
+        }
+        Vec2 q = boundary_point(n, r, c + d * (1e6 / length(d)), 0).value_or(p);
+        Vec2 out = q - c;
+        return {q, out * (1 / std::max(length(out), 1e-9))};
+    }
+    // Box: clamp in, then out to the nearest side.
+    Vec2 q{std::clamp(p.x, r.x, r.right()), std::clamp(p.y, r.y, r.bottom())};
+    double dl = q.x - r.x, dr = r.right() - q.x, dt = q.y - r.y, db = r.bottom() - q.y;
+    double m = std::min({dl, dr, dt, db});
+    if (m == dt) {
+        return {{q.x, r.y}, {0, -1}};
+    } else if (m == db) {
+        return {{q.x, r.bottom()}, {0, 1}};
+    } else if (m == dl) {
+        return {{r.x, q.y}, {-1, 0}};
+    }
+    return {{r.right(), q.y}, {1, 0}};
+}
+
+// Where an end dropped at `p` pins to the shape: on the outline near the
+// drop (snapping to edge midpoints), or nullopt when dropped well inside,
+// which means "aim at the center".
+std::optional<Vec2> pin_point(const Node& n, Rect r, Vec2 p) {
+    auto [q, out] = outline_point(n, r, p);
+    bool inside = r.contains(p) && (n.kind == Kind::Rect || n.kind == Kind::Text ||
+                                    n.kind == Kind::Image || n.kind == Kind::Pdf ||
+                                    !boundary_point(n, r, p, 0));
+    if (inside && length(q - p) > std::max(14.0, 0.12 * std::min(r.w, r.h))) {
+        return std::nullopt;
+    }
+    for (Vec2 mid : edge_mids(r)) {
+        if (length(q - mid) <= 10) {
+            return mid;
+        }
+    }
+    return q;
+}
+
 std::string lower(std::string s) {
     for (char& c : s) {
         c = char(std::tolower((unsigned char)c));
@@ -1517,10 +1568,19 @@ void App::bind_endpoints(Node& n) {
     if (pts.size() < 2) {
         return;
     }
-    Node* a = bind_target_at(pts.front(), &n);
-    Node* b = bind_target_at(pts.back(), &n);
-    n.start_bind = a ? a->id : "";
-    n.end_bind = b ? b->id : "";
+    auto bind = [&](Vec2 p, std::string& id, Vec2& at) {
+        Node* s = bind_target_at(p, &n);
+        auto r = s ? screen_rect_of(s) : std::nullopt;
+        id = r ? s->id : "";
+        at = {-1, -1};
+        if (r) {
+            if (auto q = pin_point(*s, *r, p)) {
+                at = {(q->x - r->x) / r->w, (q->y - r->y) / r->h};
+            }
+        }
+    };
+    bind(pts.front(), n.start_bind, n.start_at);
+    bind(pts.back(), n.end_bind, n.end_at);
 }
 
 // Moves attached arrow ends onto the outline of their shapes.
@@ -1563,13 +1623,25 @@ void App::update_bindings() {
         auto pts = screen_points(*n, *t);
         Vec2 p0 = pts.front(), p1 = pts.back();
         double gap = std::max(4.0, n->style.stroke_width * tp->s * 2);
-        Vec2 aim0 = b ? b->second.center() : (pts.size() > 2 ? pts[1] : p1);
-        Vec2 aim1 = a ? a->second.center() : (pts.size() > 2 ? pts[pts.size() - 2] : p0);
+        auto pin = [](const std::pair<Node*, Rect>& s, Vec2 at) {
+            const Rect& r = s.second;
+            return at.x < 0 ? r.center() : Vec2{r.x + at.x * r.w, r.y + at.y * r.h};
+        };
+        Vec2 aim0 = pts.size() > 2 ? pts[1] : b ? pin(*b, n->end_at) : p1;
+        Vec2 aim1 = pts.size() > 2 ? pts[pts.size() - 2] : a ? pin(*a, n->start_at) : p0;
+        auto place = [&](const std::pair<Node*, Rect>& s, Vec2 at, Vec2 aim, Vec2 cur) {
+            const Rect& r = s.second;
+            if (at.x < 0) {
+                return boundary_point(*s.first, r, aim, gap).value_or(cur);
+            }
+            auto [q, out] = outline_point(*s.first, r, {r.x + at.x * r.w, r.y + at.y * r.h});
+            return q + out * gap;
+        };
         if (a) {
-            p0 = boundary_point(*a->first, a->second, aim0, gap).value_or(p0);
+            p0 = place(*a, n->start_at, aim0, p0);
         }
         if (b) {
-            p1 = boundary_point(*b->first, b->second, aim1, gap).value_or(p1);
+            p1 = place(*b, n->end_at, aim1, p1);
         }
         if (length(p0 - pts.front()) < 0.01 && length(p1 - pts.back()) < 0.01) {
             continue;
@@ -1908,6 +1980,12 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
                 if (length(p - pts[i]) <= 8) {
                     drag_ = Drag::Endpoint;
                     resize_handle_ = i;
+                    // Let go while dragging; mouse up attaches it again.
+                    if (i == 0) {
+                        n->start_bind.clear();
+                    } else if (i + 1 == int(pts.size())) {
+                        n->end_bind.clear();
+                    }
                     return;
                 }
             }
@@ -2750,13 +2828,32 @@ void App::draw_overlay() {
                    : drag_ == Drag::Endpoint && !selection_.empty() ? selection_[0]
                                                                     : nullptr;
     if (linear && (linear->kind == Kind::Arrow || linear->kind == Kind::Line)) {
-        if (Node* tgt = bind_target_at(mouse_, linear)) {
-            if (auto r = screen_rect_of(tgt)) {
+        bool middle = drag_ == Drag::Endpoint && resize_handle_ > 0 &&
+                      resize_handle_ + 1 < int(linear->points.size());
+        Node* tgt = middle ? nullptr : bind_target_at(mouse_, linear);
+        if (auto r = tgt ? screen_rect_of(tgt) : std::nullopt) {
+            // Where the end will attach: a dot on the outline (pinned), or
+            // the whole shape lit up (aims at its center).
+            auto pin = pin_point(*tgt, *r, mouse_);
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, float(r->x - 6), float(r->y - 6), float(r->w + 12),
+                           float(r->h + 12), 6);
+            nvgStrokeColor(vg, ui::rgb(ui::primary, pin ? 50 : 140));
+            nvgStrokeWidth(vg, 3);
+            nvgStroke(vg);
+            if (pin) {
+                for (Vec2 m : edge_mids(*r)) { // snap targets
+                    nvgBeginPath(vg);
+                    nvgCircle(vg, float(m.x), float(m.y), 3);
+                    nvgFillColor(vg, ui::rgb(ui::primary, 90));
+                    nvgFill(vg);
+                }
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, float(r->x - 6), float(r->y - 6), float(r->w + 12),
-                               float(r->h + 12), 6);
-                nvgStrokeColor(vg, ui::rgb(ui::primary, 140));
-                nvgStrokeWidth(vg, 3);
+                nvgCircle(vg, float(pin->x), float(pin->y), 5.5f);
+                nvgFillColor(vg, nvgRGB(255, 255, 255));
+                nvgFill(vg);
+                nvgStrokeColor(vg, ui::rgb(ui::primary, 255));
+                nvgStrokeWidth(vg, 2);
                 nvgStroke(vg);
             }
         }

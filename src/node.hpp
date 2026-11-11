@@ -48,6 +48,9 @@ struct Node {
     std::string lang;         // Code: language name (see code.hpp)
     std::string start_bind;   // Line/Arrow: id of the shape the start is
     std::string end_bind;     // attached to, and the end
+    // Where on that shape each end is pinned, as a point on its outline in
+    // 0..1 of the shape's box; x < 0: not pinned, aims at the center.
+    Vec2 start_at{-1, -1}, end_at{-1, -1};
     uint32_t seed = 1;        // keeps the hand-drawn wobble stable
 
     // Runtime only: 0 = label centered, 1 = label is the top-left title.

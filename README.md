@@ -35,6 +35,7 @@ folder or `/` into a map.
 | Jump to a parent | click it in the breadcrumb (top left) |
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
 | Attach an arrow | start or end it on a shape; it follows when the shape moves or resizes |
+| Pin an arrow to a spot | drop its end on or near the outline: it stays on that exact spot (snaps to edge midpoints); drop it deep inside to aim at the center |
 | Detach an arrow | drag its end off the shape, or move the arrow by itself |
 | Label a shape / edit text | double-click the label (or a blank new shape), or Enter on a selected note. Once a shape has things inside, its label becomes a title just above it |
 | Label an arrow or line | double-click it (or select it and press Enter) |

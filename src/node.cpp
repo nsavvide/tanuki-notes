@@ -172,6 +172,12 @@ json node_to_json(const Node& n, bool recursive) {
     if (!n.end_bind.empty()) {
         j["end_bind"] = n.end_bind;
     }
+    if (!n.start_bind.empty() && n.start_at.x >= 0) {
+        j["start_at"] = {n.start_at.x, n.start_at.y};
+    }
+    if (!n.end_bind.empty() && n.end_at.x >= 0) {
+        j["end_at"] = {n.end_at.x, n.end_at.y};
+    }
     if (recursive && !n.children.empty()) {
         json kids = json::array();
         for (const auto& c : n.children) {
@@ -213,6 +219,11 @@ std::unique_ptr<Node> node_from_json(const json& j) {
     n->page = j.value("page", 0);
     n->start_bind = j.value("start_bind", "");
     n->end_bind = j.value("end_bind", "");
+    for (auto [key, at] : {std::pair{"start_at", &n->start_at}, {"end_at", &n->end_at}}) {
+        if (j.contains(key)) {
+            *at = {j[key][0].get<double>(), j[key][1].get<double>()};
+        }
+    }
     if (j.contains("children")) {
         for (const auto& c : j["children"]) {
             add_child(*n, node_from_json(c));
