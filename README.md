@@ -10,16 +10,16 @@ Needs CMake, Ninja, a C++23 compiler, OpenGL 3.3 and poppler-cpp
 (`pacman -S poppler`). SDL3, NanoVG and nlohmann/json are fetched by CMake.
 
 ```bash
-./build.sh run            # opens ~/tanuki
-./build.sh run ~/notes    # opens another map folder
+./build.sh run ~/notes    # opens (or creates) the map in ~/notes
 ./build.sh test           # self-test (hidden window)
 ./build.sh release        # optimized build in build-release/
 ./build.sh install        # release build to ~/.local/bin/tanuki-notes
 ```
 
 The fonts are compiled into the binary, so after `install` you can run
-`tanuki-notes` from anywhere (default map: `~/tanuki`) or
-`tanuki-notes path/to/map`.
+`tanuki-notes` inside any folder to use it as the map (like `git` or
+`nvim`), or `tanuki-notes path/to/map`. It refuses to turn your home
+folder or `/` into a map.
 
 ## Using it
 
@@ -70,7 +70,7 @@ Ctrl+] / Ctrl+[ bring to front / send to back.
 Everything autosaves to plain files:
 
 ```
-~/tanuki/
+notes/
   board.json                 shapes at the top level
   rust-3f9a1c/board.json     shapes inside the "Rust" shape
   rust-3f9a1c/ownership-.../ ...nested as deep as you zoom

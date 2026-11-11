@@ -24,9 +24,18 @@ void make_demo(App& app);
 
 namespace {
 
+// Without an argument the map is the folder you start it in, like git or
+// nvim. Never your home folder or / itself: saving writes board.json and
+// subfolders there, and Ctrl+S would turn it into a git repo.
 std::filesystem::path default_map_dir() {
+    namespace fs = std::filesystem;
+    fs::path cwd = fs::current_path();
     const char* home = std::getenv("HOME");
-    return std::filesystem::path(home ? home : ".") / "tanuki";
+    std::error_code ec;
+    if (cwd == cwd.root_path() || (home && fs::equivalent(cwd, home, ec))) {
+        return {};
+    }
+    return cwd;
 }
 
 Mods mods() {
@@ -76,13 +85,22 @@ int main(int argc, char** argv) {
     bool demo = args.size() >= 2 && args[0] == "--make-demo";
     bool headless = selftest || snap || demo;
 
-    std::filesystem::path map_dir = default_map_dir();
+    std::filesystem::path map_dir;
     if (snap && args.size() >= 3) {
         map_dir = args[2];
     } else if (demo) {
         map_dir = args[1];
     } else if (!headless && !args.empty()) {
         map_dir = args[0];
+    } else if (snap) {
+        map_dir = std::filesystem::current_path();
+    } else if (!headless) {
+        map_dir = default_map_dir();
+        if (map_dir.empty()) {
+            std::println(stderr, "tanuki-notes: run it inside a map folder (e.g. mkdir notes "
+                                 "&& cd notes && tanuki-notes) or pass one: tanuki-notes ~/notes");
+            return 1;
+        }
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
