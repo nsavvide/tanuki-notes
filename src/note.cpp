@@ -133,7 +133,7 @@ Layout build(NVGcontext* vg, const std::string& s, double width, int raw_line) {
     double y = 0;
     size_t ls = 0;
     int li = 0;
-    int number_run = 0; // numbered lists count on from the item above
+    std::vector<int> runs; // numbered-list count per nesting level
     while (true) {
         size_t le = std::min(s.find('\n', ls), s.size());
         bool raw = li == raw_line;
@@ -151,7 +151,16 @@ Layout build(NVGcontext* vg, const std::string& s, double width, int raw_line) {
                          : b.kind == Block::Todo ? list_x + 1.7
                          : b.kind == Block::Quote ? 1.0
                                                   : 0;
-        number_run = b.kind == Block::Number ? (number_run ? number_run + 1 : b.number) : 0;
+        // Each nesting level counts on its own; a deeper item doesn't break
+        // the count of its parent, anything else at a level restarts it.
+        bool listy = b.kind == Block::Bullet || b.kind == Block::Number || b.kind == Block::Todo;
+        runs.resize(listy ? size_t(level) + 1 : 0);
+        int number_run = 0;
+        if (b.kind == Block::Number) {
+            number_run = runs[size_t(level)] = runs[size_t(level)] ? runs[size_t(level)] + 1 : b.number;
+        } else if (listy) {
+            runs[size_t(level)] = 0;
+        }
 
         // Spans of this line: the marker, then the inline-parsed text.
         uint16_t base = heading ? Bold : 0;

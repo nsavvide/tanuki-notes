@@ -2300,8 +2300,10 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 note::ListItem it = note::list_item(s, ls);
                 size_t le2 = std::min(s.find('\n', ls), s.size());
                 if (it.marker_len && le2 == ls + it.marker_len && caret_ == le2) {
-                    s.erase(ls, it.marker_len);
-                    caret_ = ls;
+                    // Nested: step out a level. Top level: end the list.
+                    size_t n = it.indent ? std::min<size_t>(2, it.indent) : it.marker_len;
+                    s.erase(ls, n);
+                    caret_ -= n;
                     refit();
                     return;
                 }
@@ -2327,8 +2329,10 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 size_t ls = line_start(s, caret_);
                 note::ListItem it = note::list_item(s, ls);
                 if (it.marker_len && caret_ == ls + it.marker_len) {
-                    s.erase(ls, it.marker_len);
-                    caret_ = ls;
+                    // Nested: step out a level. Top level: drop the marker.
+                    size_t n = it.indent ? std::min<size_t>(2, it.indent) : it.marker_len;
+                    s.erase(ls, n);
+                    caret_ -= n;
                     refit();
                     return;
                 }

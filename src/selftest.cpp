@@ -541,6 +541,14 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             para[i] = ' ';
         }
         CHECK(note::layout(vg, para, 10, -1)->lines.size() > 5);
+        {   // Nested numbered lists count per level.
+            auto N = note::layout(vg, "1. a\n   1. x\n   2. y\n2. b\n  - z\n3. c", 20, -1);
+            std::string got;
+            for (auto& dd : N->decos) {
+                got += dd.label;
+            }
+            CHECK(got == "1.1.2.2.3.");
+        }
         // Byte -> point -> byte.
         auto c = L->caret(vg, "# Title\n- item **bold**", 12);
         CHECK(L->hit(vg, "# Title\n- item **bold**", c.x + 0.01, c.y + 0.5) == 12);
@@ -561,7 +569,13 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             app.key_down(SDLK_TAB, {});
             CHECK(n->text == "- one\n  - two");
             app.key_down(SDLK_RETURN, {});
-            app.key_down(SDLK_RETURN, {}); // empty item: ends the list
+            app.key_down(SDLK_RETURN, {}); // empty nested item: steps out
+            CHECK(n->text == "- one\n  - two\n- ");
+            app.key_down(SDLK_TAB, {});
+            app.key_down(SDLK_BACKSPACE, {}); // start of nested item: steps out
+            CHECK(n->text == "- one\n  - two\n- ");
+            app.key_down(SDLK_RETURN, {}); // empty top-level item: ends the list
+            CHECK(n->text == "- one\n  - two\n");
             type(app, "1. a");
             app.key_down(SDLK_RETURN, {});
             type(app, "b");
