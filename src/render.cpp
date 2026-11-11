@@ -8,7 +8,6 @@
 #include <nanovg.h>
 
 #include <algorithm>
-#include <tuple>
 #include <string_view>
 
 static NVGcolor color(uint32_t c, float alpha = 1) {
@@ -30,7 +29,7 @@ static double title_target(const Node& n) {
 }
 
 // Color that shows inside a shape: its solid fill, or white for a hatched
-// one, or (transparent) whatever is behind it.
+// one, or (transparent) whatever is behind it. Arrow labels cut out with it.
 static uint32_t inside_color(const Node& n) {
     if ((n.style.fill & 0xff) != 0 && n.kind != Kind::Root) {
         return n.style.fill_style == FillStyle::Solid ? n.style.fill : 0xffffffff;
@@ -79,22 +78,23 @@ TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
         }
         return L;
     }
-    // Shape label: centered and wrapped, or a title on the top border once
-    // the shape has children of its own. In between while it glides.
+    // Shape label: centered and wrapped, or a title just above the top
+    // border once the shape has children of its own (like Excalidraw's frame
+    // names). In between while it glides.
     double k = n.title_k < 0 ? title_target(n) : n.title_k;
     k = k * k * (3 - 2 * k); // ease in-out
     double max_w = k > 0 ? 0 : r.w * 0.8;
     L.lines = text::wrap(vg, text::Hand, n.text, L.px, max_w);
     double block_h = L.lines.size() * lh;
     auto lerp = [k](double a, double b) { return a + (b - a) * k; };
-    L.top = lerp(r.y + (r.h - block_h) / 2, r.y - lh / 2);
+    L.top = lerp(r.y + (r.h - block_h) / 2, r.y - block_h - L.px * 0.1);
     // Rectangles get their title near the left; round and pointy shapes
     // only touch their box at the top middle.
     bool left = n.kind == Kind::Rect || n.kind == Kind::Pdf;
     for (const auto& sp : L.lines) {
         double w = width(sp);
         double centered = r.x + (r.w - w) / 2;
-        L.line_x.push_back(lerp(centered, left ? r.x + L.px * 0.9 : centered));
+        L.line_x.push_back(lerp(centered, left ? r.x : centered));
     }
     return L;
 }
@@ -437,32 +437,19 @@ static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         return;
     }
     TextLayout L = layout_text(ctx.vg, n, t);
-    // Cut the line behind the words: a title on the border shows what's
-    // outside above the line and the shape's inside below it; an arrow
-    // label shows what's behind the arrow.
-    double kk = n.title_k < 0 ? title_target(n) : n.title_k;
-    float cut = n.is_linear() ? 1.0f : float(kk * kk * (3 - 2 * kk));
-    if (cut > 0.01f && L.px >= 2) {
-        Rect r = screen_rect(n, t);
+    // Arrow labels cut the line behind them.
+    if (n.is_linear() && L.px >= 2) {
         double lh = L.px * text::line_height, padx = L.px * 0.3;
-        NVGcolor outside = color(behind_color(n), alpha * cut);
-        NVGcolor inside = color(n.is_linear() ? behind_color(n) : inside_color(n), alpha * cut);
         for (size_t i = 0; i < L.lines.size(); ++i) {
             const auto& sp = L.lines[i];
             double w = text::measure(ctx.vg, text::Hand,
                                      n.text.substr(sp.begin, sp.end - sp.begin), L.px);
-            if (w <= 0) {
-                continue;
-            }
-            double x0 = L.line_x[i] - padx, y0 = L.top + i * lh, y1 = y0 + lh;
-            double split = std::clamp(r.y, y0, y1);
-            for (auto [a, b, c] : {std::tuple{y0, split, outside}, std::tuple{split, y1, inside}}) {
-                if (b > a) {
-                    nvgBeginPath(ctx.vg);
-                    nvgRect(ctx.vg, float(x0), float(a), float(w + 2 * padx), float(b - a));
-                    nvgFillColor(ctx.vg, c);
-                    nvgFill(ctx.vg);
-                }
+            if (w > 0) {
+                nvgBeginPath(ctx.vg);
+                nvgRect(ctx.vg, float(L.line_x[i] - padx), float(L.top + i * lh),
+                        float(w + 2 * padx), float(lh));
+                nvgFillColor(ctx.vg, color(behind_color(n), alpha));
+                nvgFill(ctx.vg);
             }
         }
     }

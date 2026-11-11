@@ -481,7 +481,7 @@ Node* App::pick_in(Node& n, Xform t, Vec2 p) {
     // Labels can reach past the box: a title on the top border, a long
     // label on a short arrow.
     double label = n.text.empty() || n.kind == Kind::Text ? 0
-                   : n.style.font_size * parent_scale(n, t) * (n.is_linear() ? 8 : 1);
+                   : n.style.font_size * parent_scale(n, t) * (n.is_linear() ? 8 : 1.5);
     if (n.kind != Kind::Root &&
         (!r.expanded(std::max({8.0, sw, label})).contains(p) || (r.w < 2 && r.h < 2))) {
         return nullptr;

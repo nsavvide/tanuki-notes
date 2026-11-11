@@ -36,7 +36,7 @@ folder or `/` into a map.
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
 | Attach an arrow | start or end it on a shape; it follows when the shape moves or resizes |
 | Detach an arrow | drag its end off the shape, or move the arrow by itself |
-| Label a shape / edit text | double-click the label (or a blank new shape), or Enter on a selected note. Once a shape has things inside, its label becomes a title on its top border |
+| Label a shape / edit text | double-click the label (or a blank new shape), or Enter on a selected note. Once a shape has things inside, its label becomes a title just above it |
 | Label an arrow or line | double-click it (or select it and press Enter) |
 | New text | double-click the background, or T |
 | Insert image or PDF | 9, drag and drop a file, or paste an image |
