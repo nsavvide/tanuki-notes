@@ -91,4 +91,7 @@ struct ListItem {
 };
 ListItem list_item(const std::string& text, size_t line_start);
 
+// Rewrites numbered-list markers to the numbers they're shown with.
+std::string renumber(const std::string& text);
+
 } // namespace note

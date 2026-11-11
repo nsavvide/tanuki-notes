@@ -548,6 +548,8 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
                 got += dd.label;
             }
             CHECK(got == "1.1.2.2.3.");
+            CHECK(note::renumber("1. a\n2. x\n3. y\n4. b") == "1. a\n2. x\n3. y\n4. b");
+            CHECK(note::renumber("1. a\n  2. x\n  3. y\n4. b") == "1. a\n  1. x\n  2. y\n2. b");
         }
         // Byte -> point -> byte.
         auto c = L->caret(vg, "# Title\n- item **bold**", 12);
@@ -580,11 +582,23 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             app.key_down(SDLK_RETURN, {});
             type(app, "b");
             app.key_down(SDLK_RETURN, {});
-            app.key_down(SDLK_RETURN, {}); // "3. " left empty: the list ends
+            app.key_down(SDLK_TAB, {}); // nested under "2. b": starts at 1
+            CHECK(n->text.ends_with("1. a\n2. b\n  1. "));
+            type(app, "x");
+            app.key_down(SDLK_RETURN, {});
+            CHECK(n->text.ends_with("\n  1. x\n  2. "));
+            app.key_down(SDLK_RETURN, {}); // steps out: continues the parent
+            CHECK(n->text.ends_with("\n  1. x\n3. "));
+            app.key_down(SDLK_TAB, {});
+            CHECK(n->text.ends_with("\n  1. x\n  2. "));
+            app.key_down(SDLK_TAB, {.shift = true});
+            CHECK(n->text.ends_with("\n  1. x\n3. "));
+            app.key_down(SDLK_BACKSPACE, {}); // top-level: drops the marker
+            CHECK(n->text.ends_with("\n  1. x\n"));
             type(app, "- [x] done");
             app.key_down(SDLK_RETURN, {});
             type(app, "todo");
-            CHECK(n->text == "- one\n  - two\n1. a\n2. b\n- [x] done\n- [ ] todo");
+            CHECK(n->text == "- one\n  - two\n1. a\n2. b\n  1. x\n- [x] done\n- [ ] todo");
             // Backspace at the start of an item drops its marker.
             app.key_down(SDLK_HOME, {});
             for (int i = 0; i < 6; ++i) {

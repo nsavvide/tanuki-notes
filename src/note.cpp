@@ -157,7 +157,7 @@ Layout build(NVGcontext* vg, const std::string& s, double width, int raw_line) {
         runs.resize(listy ? size_t(level) + 1 : 0);
         int number_run = 0;
         if (b.kind == Block::Number) {
-            number_run = runs[size_t(level)] = runs[size_t(level)] ? runs[size_t(level)] + 1 : b.number;
+            number_run = runs[size_t(level)] = runs[size_t(level)] ? runs[size_t(level)] + 1 : level ? 1 : b.number;
         } else if (listy) {
             runs[size_t(level)] = 0;
         }
@@ -396,6 +396,38 @@ size_t Layout::hit(NVGcontext* vg, const std::string& s, double x, double y) con
         last = &p;
     }
     return last ? last->end : s.size();
+}
+
+std::string renumber(const std::string& text) {
+    // Same counting as the layout: per level, a deeper item doesn't break
+    // its parent's count. A nested list starts at 1, a top-level one keeps
+    // its first number.
+    std::string out;
+    std::vector<int> runs;
+    size_t ls = 0;
+    while (true) {
+        size_t le = std::min(text.find('\n', ls), text.size());
+        BlockInfo b = parse_block(text, ls, le);
+        size_t level = b.indent / 2;
+        bool listy = b.kind == Block::Bullet || b.kind == Block::Number || b.kind == Block::Todo;
+        runs.resize(listy ? level + 1 : 0);
+        if (b.kind == Block::Number) {
+            int& r = runs[level];
+            r = r ? r + 1 : level ? 1 : b.number;
+            out += text.substr(ls, b.indent) + std::format("{}. ", r);
+            out += text.substr(b.content, le - b.content);
+        } else {
+            if (listy) {
+                runs[level] = 0;
+            }
+            out += text.substr(ls, le - ls);
+        }
+        if (le >= text.size()) {
+            return out;
+        }
+        out += '\n';
+        ls = le + 1;
+    }
 }
 
 ListItem list_item(const std::string& text, size_t ls) {

@@ -2196,6 +2196,20 @@ void App::key_down(SDL_Keycode key, Mods m) {
         std::string& s = editing_->text;
         caret_blink_start_ = now_;
         auto refit = [&] { refit_editing(); };
+        // After a list item changes level, numbers follow; the caret keeps
+        // its distance from the end of its line.
+        auto renumber = [&] {
+            size_t le = std::min(s.find('\n', caret_), s.size());
+            size_t from_end = le - caret_;
+            int line = note::line_of(s, caret_);
+            s = note::renumber(s);
+            size_t ls = 0;
+            for (int i = 0; i < line; ++i) {
+                ls = s.find('\n', ls) + 1;
+            }
+            size_t le2 = std::min(s.find('\n', ls), s.size());
+            caret_ = le2 - std::min(from_end, le2 - ls);
+        };
         if (vim_.mode != vim::Mode::Insert) {
             // Normal and Visual mode: typed characters arrive in text_input.
             auto feed = [&](const char* k) {
@@ -2267,6 +2281,7 @@ void App::key_down(SDL_Keycode key, Mods m) {
                         s.erase(ls, n);
                         caret_ -= std::min(caret_ - ls, n);
                     }
+                    renumber();
                     refit();
                 }
             }
@@ -2304,6 +2319,7 @@ void App::key_down(SDL_Keycode key, Mods m) {
                     size_t n = it.indent ? std::min<size_t>(2, it.indent) : it.marker_len;
                     s.erase(ls, n);
                     caret_ -= n;
+                    renumber();
                     refit();
                     return;
                 }
@@ -2333,6 +2349,7 @@ void App::key_down(SDL_Keycode key, Mods m) {
                     size_t n = it.indent ? std::min<size_t>(2, it.indent) : it.marker_len;
                     s.erase(ls, n);
                     caret_ -= n;
+                    renumber();
                     refit();
                     return;
                 }
