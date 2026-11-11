@@ -431,6 +431,11 @@ bool App::hit_self(const Node& n, Xform t, Vec2 p) const {
     Rect r = screen_rect(n, t);
     double sw = n.style.stroke_width * parent_scale(n, t);
     double tol = std::max(6.0, sw / 2 + 4);
+    // Titles on the border and arrow labels belong to their shape.
+    if (!n.text.empty() && n.kind != Kind::Text && n.kind != Kind::Code &&
+        (n.is_linear() || !n.children.empty()) && on_label(n, p)) {
+        return true;
+    }
     bool filled = (n.style.fill & 0xff) != 0 ||
                   (!n.text.empty() && n.children.empty());
     switch (n.kind) {
@@ -473,8 +478,12 @@ bool App::hit_self(const Node& n, Xform t, Vec2 p) const {
 Node* App::pick_in(Node& n, Xform t, Vec2 p) {
     Rect r = screen_rect(n, t);
     double sw = n.style.stroke_width * parent_scale(n, t);
+    // Labels can reach past the box: a title on the top border, a long
+    // label on a short arrow.
+    double label = n.text.empty() || n.kind == Kind::Text ? 0
+                   : n.style.font_size * parent_scale(n, t) * (n.is_linear() ? 8 : 1);
     if (n.kind != Kind::Root &&
-        (!r.expanded(std::max(8.0, sw)).contains(p) || (r.w < 2 && r.h < 2))) {
+        (!r.expanded(std::max({8.0, sw, label})).contains(p) || (r.w < 2 && r.h < 2))) {
         return nullptr;
     }
     // Topmost first: later siblings, and children above their parent.
@@ -746,7 +755,7 @@ void App::finish_text_edit() {
     Node* n = editing_;
     editing_ = nullptr;
     SDL_StopTextInput(window_);
-    if (n->kind != Kind::Code) {
+    if (n->kind != Kind::Code && !n->is_linear()) {
         split_fences(*n);
     }
     if (n->kind == Kind::Text) {
@@ -1363,7 +1372,8 @@ void App::edit_selected() {
     }
     Node& n = *selection_[0];
     if (n.kind == Kind::Text || n.kind == Kind::Code || n.kind == Kind::Rect ||
-               n.kind == Kind::Ellipse || n.kind == Kind::Diamond) {
+        n.kind == Kind::Ellipse || n.kind == Kind::Diamond || n.kind == Kind::Line ||
+        n.kind == Kind::Arrow) {
         start_text_edit(n);
     }
 }
@@ -1828,8 +1838,12 @@ void App::mouse_down(Vec2 p, int button, int clicks, Mods m) {
             start_text_edit(*hit);
             return;
         }
+        if (hit && hit->is_linear() && hit->kind != Kind::Draw) {
+            start_text_edit(*hit); // a label on the arrow or line
+            return;
+        }
         if (hit && !hit->is_container()) {
-            return; // lines, drawings, images
+            return; // drawings, images
         }
         Node* box = hit ? hit : container_at(p, nullptr);
         if (is_ancestor(box, anchor_)) { // the world we're already in
@@ -2272,7 +2286,8 @@ void App::key_down(SDL_Keycode key, Mods m) {
                 trimmed.pop_back();
             }
             bool at_eol = le == caret_ || (le == std::string::npos && caret_ == s.size());
-            if (at_eol && editing_->kind != Kind::Code && trimmed.starts_with("```")) {
+            if (at_eol && editing_->kind != Kind::Code && !editing_->is_linear() &&
+                trimmed.starts_with("```")) {
                 open_code_block(trimmed.substr(3));
                 return;
             }

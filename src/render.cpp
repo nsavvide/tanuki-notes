@@ -8,6 +8,7 @@
 #include <nanovg.h>
 
 #include <algorithm>
+#include <tuple>
 #include <string_view>
 
 static NVGcolor color(uint32_t c, float alpha = 1) {
@@ -28,6 +29,18 @@ static double title_target(const Node& n) {
     return !n.children.empty() || n.kind == Kind::Pdf ? 1 : 0;
 }
 
+// Color that shows inside a shape: its solid fill, or white for a hatched
+// one, or (transparent) whatever is behind it.
+static uint32_t inside_color(const Node& n) {
+    if ((n.style.fill & 0xff) != 0 && n.kind != Kind::Root) {
+        return n.style.fill_style == FillStyle::Solid ? n.style.fill : 0xffffffff;
+    }
+    return n.parent ? inside_color(*n.parent) : 0xffffffff;
+}
+static uint32_t behind_color(const Node& n) {
+    return n.parent ? inside_color(*n.parent) : 0xffffffff;
+}
+
 TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
     TextLayout L;
     Rect r = screen_rect(n, t);
@@ -38,21 +51,50 @@ TextLayout layout_text(NVGcontext* vg, const Node& n, Xform t) {
         L.line_x.assign(L.lines.size(), r.x);
         return L;
     }
-    // Shape label: centered and wrapped, or a title in the top-left corner
-    // once the shape has children of its own. In between while it glides.
+    double lh = L.px * text::line_height;
+    auto width = [&](const text::Span& sp) {
+        return text::measure(vg, text::Hand, n.text.substr(sp.begin, sp.end - sp.begin), L.px);
+    };
+    if (n.is_linear()) {
+        // Arrow and line labels sit centered on the middle of the path.
+        L.lines = text::wrap(vg, text::Hand, n.text, L.px, L.px * 16);
+        auto pts = screen_points(n, t);
+        Vec2 mid = r.center();
+        double total = 0;
+        for (size_t i = 1; i < pts.size(); ++i) {
+            total += length(pts[i] - pts[i - 1]);
+        }
+        double half = total / 2;
+        for (size_t i = 1; i < pts.size(); ++i) {
+            double seg = length(pts[i] - pts[i - 1]);
+            if (seg > 0 && half <= seg) {
+                mid = pts[i - 1] + (pts[i] - pts[i - 1]) * (half / seg);
+                break;
+            }
+            half -= seg;
+        }
+        L.top = mid.y - L.lines.size() * lh / 2;
+        for (const auto& sp : L.lines) {
+            L.line_x.push_back(mid.x - width(sp) / 2);
+        }
+        return L;
+    }
+    // Shape label: centered and wrapped, or a title on the top border once
+    // the shape has children of its own. In between while it glides.
     double k = n.title_k < 0 ? title_target(n) : n.title_k;
     k = k * k * (3 - 2 * k); // ease in-out
-    double pad = std::max(L.px * 0.5, r.w * 0.04);
-    double max_w = k > 0 ? r.w - 2 * pad : r.w * 0.8;
+    double max_w = k > 0 ? 0 : r.w * 0.8;
     L.lines = text::wrap(vg, text::Hand, n.text, L.px, max_w);
-    double block_h = L.lines.size() * L.px * text::line_height;
+    double block_h = L.lines.size() * lh;
     auto lerp = [k](double a, double b) { return a + (b - a) * k; };
-    L.top = lerp(r.y + (r.h - block_h) / 2, r.y + pad * 0.6);
-    for (const auto& span : L.lines) {
-        double w = text::measure(vg, text::Hand,
-                                 n.text.substr(span.begin, span.end - span.begin),
-                                 L.px);
-        L.line_x.push_back(lerp(r.x + (r.w - w) / 2, r.x + pad));
+    L.top = lerp(r.y + (r.h - block_h) / 2, r.y - lh / 2);
+    // Rectangles get their title near the left; round and pointy shapes
+    // only touch their box at the top middle.
+    bool left = n.kind == Kind::Rect || n.kind == Kind::Pdf;
+    for (const auto& sp : L.lines) {
+        double w = width(sp);
+        double centered = r.x + (r.w - w) / 2;
+        L.line_x.push_back(lerp(centered, left ? r.x + L.px * 0.9 : centered));
     }
     return L;
 }
@@ -395,6 +437,35 @@ static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         return;
     }
     TextLayout L = layout_text(ctx.vg, n, t);
+    // Cut the line behind the words: a title on the border shows what's
+    // outside above the line and the shape's inside below it; an arrow
+    // label shows what's behind the arrow.
+    double kk = n.title_k < 0 ? title_target(n) : n.title_k;
+    float cut = n.is_linear() ? 1.0f : float(kk * kk * (3 - 2 * kk));
+    if (cut > 0.01f && L.px >= 2) {
+        Rect r = screen_rect(n, t);
+        double lh = L.px * text::line_height, padx = L.px * 0.3;
+        NVGcolor outside = color(behind_color(n), alpha * cut);
+        NVGcolor inside = color(n.is_linear() ? behind_color(n) : inside_color(n), alpha * cut);
+        for (size_t i = 0; i < L.lines.size(); ++i) {
+            const auto& sp = L.lines[i];
+            double w = text::measure(ctx.vg, text::Hand,
+                                     n.text.substr(sp.begin, sp.end - sp.begin), L.px);
+            if (w <= 0) {
+                continue;
+            }
+            double x0 = L.line_x[i] - padx, y0 = L.top + i * lh, y1 = y0 + lh;
+            double split = std::clamp(r.y, y0, y1);
+            for (auto [a, b, c] : {std::tuple{y0, split, outside}, std::tuple{split, y1, inside}}) {
+                if (b > a) {
+                    nvgBeginPath(ctx.vg);
+                    nvgRect(ctx.vg, float(x0), float(a), float(w + 2 * padx), float(b - a));
+                    nvgFillColor(ctx.vg, c);
+                    nvgFill(ctx.vg);
+                }
+            }
+        }
+    }
     NVGcolor c = color(n.style.stroke, alpha);
     NVGcolor lc = color(link_color, alpha);
     for (size_t i = 0; i < L.lines.size(); ++i) {

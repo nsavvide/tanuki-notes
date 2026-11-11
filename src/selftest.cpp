@@ -696,6 +696,20 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         Vec2 mid = (pts.front() + pts.back()) * 0.5;
         drag(app, mid, mid + Vec2{0, 60});
         CHECK(arrow->start_bind.empty() && arrow->end_bind.empty());
+
+        // Double-click an arrow to give it a label; clicking the label picks it.
+        click(app, {1200, 750});
+        tick(app);
+        auto mid_pts = screen_points(*arrow, *app.xform_of(arrow));
+        Vec2 amid = (mid_pts.front() + mid_pts.back()) * 0.5;
+        click(app, amid, 2);
+        CHECK(app.editing_ == arrow);
+        type(app, "calls");
+        finish_edit(app);
+        CHECK(arrow->text == "calls");
+        TextLayout lt = layout_text(vg, *arrow, *app.xform_of(arrow));
+        CHECK(std::abs(lt.top + lt.px * text::line_height / 2 - amid.y) < 2);
+        CHECK(app.pick({lt.line_x[0] + 3, lt.top + 3}) == arrow);
     }
     fs::remove_all(dir2);
 
