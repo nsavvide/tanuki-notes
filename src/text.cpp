@@ -1,4 +1,5 @@
 #include "text.hpp"
+#include "ui.hpp"
 
 // Private copy of stb_truetype for vector glyphs. NanoVG's copy routes its
 // allocations through fontstash, so it can't be called directly.
@@ -151,7 +152,7 @@ void draw_vector(NVGcontext* vg, Font f, const std::string& s, double x,
             break;
         }
     }
-    nvgFillColor(vg, color);
+    ui::fill(vg, color);
     nvgFill(vg);
 }
 
@@ -251,13 +252,13 @@ void draw_line(NVGcontext* vg, Font f, const std::string& s, double x,
         nvgBeginPath(vg);
         nvgRect(vg, float(x), float(y_top + px * 0.4), float(box.w),
                 float(std::max(px * 0.4, 0.5)));
-        nvgFillColor(vg, nvgTransRGBAf(color, 0.35f));
+        ui::fill(vg, nvgTransRGBAf(color, 0.35f));
         nvgFill(vg);
     } else if (px <= vector_px) {
         nvgFontFaceId(vg, nvg_font[f]);
         nvgFontSize(vg, float(px));
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BASELINE);
-        nvgFillColor(vg, color);
+        ui::fill(vg, color);
         nvgText(vg, float(x), float(baseline), s.data(), s.data() + s.size());
     } else {
         draw_vector(vg, f, s, x, baseline, px, color, viewport);

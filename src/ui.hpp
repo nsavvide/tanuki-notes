@@ -16,6 +16,18 @@ namespace ui {
 inline NVGcolor rgb(uint32_t hex, unsigned char a = 255) {
     return nvgRGBA((hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff, a);
 }
+// Dark mode: every color keeps its hue and flips its lightness (white paper
+// becomes #121212, black ink becomes #ededed), like Excalidraw's dark theme.
+inline bool dark = false;
+inline bool unthemed = false; // set while drawing things with fixed colors (code blocks)
+NVGcolor themed(NVGcolor c);
+// The choice is kept in ~/.config/tanuki-notes/theme ("dark" or "light");
+// without it, `system_dark` decides.
+void load_theme(bool system_dark);
+void save_theme();
+inline void fill(NVGcontext* vg, NVGcolor c) { nvgFillColor(vg, themed(c)); }
+inline void stroke(NVGcontext* vg, NVGcolor c) { nvgStrokeColor(vg, themed(c)); }
+
 constexpr uint32_t primary = 0x6965db;      // selection, accents
 constexpr uint32_t primary_light = 0xe0dfff; // active tool background
 constexpr uint32_t hover = 0xf1f0ff;
@@ -62,7 +74,7 @@ enum class Icon {
     Hand, Select, Rect, Diamond, Ellipse, Arrow, Line, Draw, Text, Image,
     Eraser, Undo, Redo, Plus, Minus, Trash, Duplicate, ToFront, ToBack, Git,
     Hachure, CrossHatch, Solid, Thin, Bold, ExtraBold, Architect, Artist,
-    Cartoonist, Search,
+    Cartoonist, Search, Moon, Sun,
 };
 
 // White rounded panel with a soft shadow.

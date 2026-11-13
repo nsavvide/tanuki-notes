@@ -8,6 +8,7 @@
 #include "code.hpp"
 #include "note.hpp"
 #include "render.hpp"
+#include "ui.hpp"
 #include "store.hpp"
 #include "text.hpp"
 #include "vim.hpp"
@@ -804,6 +805,19 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         CHECK(app.root().children[3]->start_at.x < 0);
     }
     fs::remove_all(dir2);
+
+    {   // Dark mode flips lightness, keeps hue; light mode leaves colors be.
+        NVGcolor w = nvgRGB(255, 255, 255), k = nvgRGB(30, 30, 30);
+        CHECK(ui::themed(w).r == w.r);
+        ui::dark = true;
+        CHECK(std::abs(ui::themed(w).r - 0.07f) < 0.01f);
+        CHECK(ui::themed(k).r > 0.8f);
+        NVGcolor fill = ui::rgb(0xa5d8ff), accent = ui::rgb(ui::primary);
+        CHECK(ui::themed(fill).b < 0.5f);    // a light blue fill goes dark
+        CHECK(ui::themed(fill).b > ui::themed(fill).r); // and stays blue
+        CHECK(ui::themed(accent).b > 0.7f);  // accents stay bright
+        ui::dark = false;
+    }
 
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);

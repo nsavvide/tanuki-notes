@@ -1,8 +1,62 @@
 #include "ui.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <numbers>
 
 namespace ui {
+
+static std::filesystem::path theme_file() {
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    const char* home = std::getenv("HOME");
+    std::filesystem::path base = xdg && *xdg ? xdg : std::filesystem::path(home ? home : ".") / ".config";
+    return base / "tanuki-notes" / "theme";
+}
+
+void load_theme(bool system_dark) {
+    std::string s;
+    std::ifstream(theme_file()) >> s;
+    dark = s.empty() ? system_dark : s == "dark";
+}
+
+void save_theme() {
+    std::error_code ec;
+    std::filesystem::create_directories(theme_file().parent_path(), ec);
+    std::ofstream(theme_file()) << (dark ? "dark" : "light") << '\n';
+}
+
+NVGcolor themed(NVGcolor c) {
+    if (!dark || unthemed) {
+        return c;
+    }
+    // RGB -> HSL, lightness L -> 0.93 - 0.86 L, back to RGB.
+    float r = c.r, g = c.g, b = c.b;
+    float mx = std::max({r, g, b}), mn = std::min({r, g, b});
+    float l = (mx + mn) / 2, d = mx - mn, h = 0, s = 0;
+    if (d > 1e-6f) {
+        s = d / (1 - std::abs(2 * l - 1));
+        h = mx == r ? std::fmod((g - b) / d + 6, 6.0f) : mx == g ? (b - r) / d + 2 : (r - g) / d + 4;
+    }
+    bool pastel = l >= 0.74f;
+    l = 0.93f - 0.86f * l;
+    if (s > 0.4f && !pastel) { // strong colors (accents, strokes) stay bright
+        l = std::max(l, 0.62f);
+    }
+    float C = (1 - std::abs(2 * l - 1)) * s, X = C * (1 - std::abs(std::fmod(h, 2.0f) - 1));
+    float m = l - C / 2, rr = 0, gg = 0, bb = 0;
+    switch (int(h)) {
+    case 0: rr = C, gg = X; break;
+    case 1: rr = X, gg = C; break;
+    case 2: gg = C, bb = X; break;
+    case 3: gg = X, bb = C; break;
+    case 4: rr = X, bb = C; break;
+    default: rr = C, bb = X; break;
+    }
+    return nvgRGBAf(rr + m, gg + m, bb + m, c.a);
+}
 
 void island(NVGcontext* vg, Rect r) {
     float x = float(r.x), y = float(r.y), w = float(r.w), h = float(r.h);
@@ -17,9 +71,9 @@ void island(NVGcontext* vg, Rect r) {
 
     nvgBeginPath(vg);
     nvgRoundedRect(vg, x, y, w, h, 8);
-    nvgFillColor(vg, nvgRGB(255, 255, 255));
+    nvgFillColor(vg, dark ? rgb(0x232329) : nvgRGB(255, 255, 255));
     nvgFill(vg);
-    nvgStrokeColor(vg, rgb(line));
+    nvgStrokeColor(vg, dark ? rgb(0x2e2d39) : rgb(line));
     nvgStrokeWidth(vg, 1);
     nvgStroke(vg);
 }
@@ -30,7 +84,8 @@ void button_bg(NVGcontext* vg, Rect r, bool active, bool hovered) {
     }
     nvgBeginPath(vg);
     nvgRoundedRect(vg, float(r.x), float(r.y), float(r.w), float(r.h), 6);
-    nvgFillColor(vg, rgb(active ? primary_light : hover));
+    nvgFillColor(vg, dark ? rgb(active ? 0x403e6a : 0x2e2d39)
+                          : rgb(active ? primary_light : hover));
     nvgFill(vg);
 }
 
@@ -39,7 +94,7 @@ float label(NVGcontext* vg, const std::string& s, double x, double y,
     nvgFontFace(vg, medium ? "ui-medium" : "ui");
     nvgFontSize(vg, size);
     nvgTextAlign(vg, align);
-    nvgFillColor(vg, c);
+    fill(vg, c);
     return nvgText(vg, float(x), float(y), s.c_str(), nullptr) - float(x);
 }
 
@@ -48,29 +103,29 @@ void swatch(NVGcontext* vg, Rect r, uint32_t rgba, bool active) {
     if (active) {
         nvgBeginPath(vg);
         nvgRoundedRect(vg, x - 2, y - 2, w + 4, h + 4, 6);
-        nvgStrokeColor(vg, rgb(primary));
+        stroke(vg, rgb(primary));
         nvgStrokeWidth(vg, 1.5f);
         nvgStroke(vg);
     }
     nvgBeginPath(vg);
     nvgRoundedRect(vg, x, y, w, h, 4);
     if ((rgba & 0xff) == 0) { // transparent: checker hint
-        nvgFillColor(vg, nvgRGB(255, 255, 255));
+        fill(vg, nvgRGB(255, 255, 255));
         nvgFill(vg);
-        nvgStrokeColor(vg, rgb(0xced4da));
+        stroke(vg, rgb(0xced4da));
         nvgStrokeWidth(vg, 1);
         nvgStroke(vg);
         nvgBeginPath(vg);
         nvgMoveTo(vg, x + 3, y + h - 3);
         nvgLineTo(vg, x + w - 3, y + 3);
-        nvgStrokeColor(vg, rgb(0xe03131));
+        stroke(vg, rgb(0xe03131));
         nvgStroke(vg);
         return;
     }
-    nvgFillColor(vg, nvgRGBA((rgba >> 24) & 0xff, (rgba >> 16) & 0xff,
+    fill(vg, nvgRGBA((rgba >> 24) & 0xff, (rgba >> 16) & 0xff,
                              (rgba >> 8) & 0xff, 255));
     nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 25));
+    stroke(vg, nvgRGBA(0, 0, 0, 25));
     nvgStrokeWidth(vg, 1);
     nvgStroke(vg);
 }
@@ -79,8 +134,8 @@ void swatch(NVGcontext* vg, Rect r, uint32_t rgba, bool active) {
 void icon(NVGcontext* vg, Icon which, Rect box, NVGcolor c) {
     nvgSave(vg);
     nvgTranslate(vg, float(box.x + box.w / 2 - 10), float(box.y + box.h / 2 - 10));
-    nvgStrokeColor(vg, c);
-    nvgFillColor(vg, c);
+    stroke(vg, c);
+    fill(vg, c);
     nvgStrokeWidth(vg, 1.5f);
     nvgLineCap(vg, NVG_ROUND);
     nvgLineJoin(vg, NVG_ROUND);
@@ -265,6 +320,21 @@ void icon(NVGcontext* vg, Icon which, Rect box, NVGcolor c) {
     case Icon::Search:
         nvgCircle(vg, 8.5f, 8.5f, 5.5f);
         line_(12.5f, 12.5f, 16.5f, 16.5f);
+        break;
+    case Icon::Moon:
+        // Crescent: the long way round one circle, back along another.
+        nvgArc(vg, 10, 10, 6.5f, -std::numbers::pi_v<float> / 3,
+               std::numbers::pi_v<float> / 3, NVG_CCW);
+        nvgArc(vg, 17, 10, 6.76f, 2.159f, 4.124f, NVG_CW);
+        nvgClosePath(vg);
+        break;
+    case Icon::Sun:
+        nvgCircle(vg, 10, 10, 3.5f);
+        for (int i = 0; i < 8; ++i) {
+            double a = i * std::numbers::pi / 4;
+            line_(float(10 + 5.5 * std::cos(a)), float(10 + 5.5 * std::sin(a)),
+                  float(10 + 7.5 * std::cos(a)), float(10 + 7.5 * std::sin(a)));
+        }
         break;
     case Icon::Cartoonist:
         nvgMoveTo(vg, 3, 15);

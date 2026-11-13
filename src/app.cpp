@@ -1556,6 +1556,12 @@ std::vector<Vec2> App::bend_handles(const Node& n, Xform t) const {
     return out;
 }
 
+void App::toggle_theme() {
+    ui::dark = !ui::dark;
+    ui::save_theme();
+    toast(ui::dark ? "Dark mode" : "Light mode");
+}
+
 void App::bind_endpoints(Node& n) {
     if (n.kind != Kind::Arrow && n.kind != Kind::Line) {
         return;
@@ -1775,7 +1781,7 @@ void App::draw_search() {
     if (std::fmod(now_ - caret_blink_start_, 1.0) < 0.6) {
         nvgBeginPath(vg);
         nvgRect(vg, float(tx + tw + 1), float(ty - 10), 1.5f, 20);
-        nvgFillColor(vg, ui::rgb(ui::primary));
+        ui::fill(vg, ui::rgb(ui::primary));
         nvgFill(vg);
     }
     ui::label(vg, "Esc", panel.right() - 16, ty, 11.5f, ui::rgb(0xadb5bd), false,
@@ -1784,7 +1790,7 @@ void App::draw_search() {
     if (shown || empty_msg) {
         nvgBeginPath(vg);
         nvgRect(vg, float(panel.x), float(panel.y + 52), float(panel.w), 1);
-        nvgFillColor(vg, ui::rgb(ui::line));
+        ui::fill(vg, ui::rgb(ui::line));
         nvgFill(vg);
     }
     if (empty_msg) {
@@ -2534,6 +2540,10 @@ void App::key_down(SDL_Keycode key, Mods m) {
         }
     }
 
+    if (m.alt && m.shift && key == SDLK_D) { // Excalidraw's dark mode shortcut
+        toggle_theme();
+        return;
+    }
     if (m.ctrl) {
         switch (key) {
         case SDLK_F:
@@ -2766,7 +2776,7 @@ void App::draw_overlay() {
                 nvgBeginPath(vg);
                 nvgRect(vg, float(r->x - 4), float(r->y - 4), float(r->w + 8),
                         float(r->h + 8));
-                nvgStrokeColor(vg, ui::rgb(ui::primary, 90));
+                ui::stroke(vg, ui::rgb(ui::primary, 90));
                 nvgStrokeWidth(vg, 1);
                 nvgStroke(vg);
             }
@@ -2783,7 +2793,7 @@ void App::draw_overlay() {
         if (!(selection_.size() == 1 && linear2)) {
             nvgBeginPath(vg);
             nvgRect(vg, float(r.x), float(r.y), float(r.w), float(r.h));
-            nvgStrokeColor(vg, accent);
+            ui::stroke(vg, accent);
             nvgStrokeWidth(vg, 1);
             nvgStroke(vg);
         }
@@ -2794,16 +2804,16 @@ void App::draw_overlay() {
             for (Vec2 p : screen_points(*n, *t)) {
                 nvgBeginPath(vg);
                 nvgCircle(vg, float(p.x), float(p.y), 5);
-                nvgFillColor(vg, nvgRGB(255, 255, 255));
+                ui::fill(vg, nvgRGB(255, 255, 255));
                 nvgFill(vg);
-                nvgStrokeColor(vg, accent);
+                ui::stroke(vg, accent);
                 nvgStroke(vg);
             }
             if (n->kind != Kind::Draw) {
                 for (Vec2 p : bend_handles(*n, *t)) {
                     nvgBeginPath(vg);
                     nvgCircle(vg, float(p.x), float(p.y), 3.5f);
-                    nvgFillColor(vg, ui::rgb(ui::primary, 90));
+                    ui::fill(vg, ui::rgb(ui::primary, 90));
                     nvgFill(vg);
                 }
             }
@@ -2816,9 +2826,9 @@ void App::draw_overlay() {
         for (Vec2 p : hp) {
             nvgBeginPath(vg);
             nvgRoundedRect(vg, float(p.x - 4), float(p.y - 4), 8, 8, 2);
-            nvgFillColor(vg, nvgRGB(255, 255, 255));
+            ui::fill(vg, nvgRGB(255, 255, 255));
             nvgFill(vg);
-            nvgStrokeColor(vg, accent);
+            ui::stroke(vg, accent);
             nvgStrokeWidth(vg, 1);
             nvgStroke(vg);
         }
@@ -2838,21 +2848,21 @@ void App::draw_overlay() {
             nvgBeginPath(vg);
             nvgRoundedRect(vg, float(r->x - 6), float(r->y - 6), float(r->w + 12),
                            float(r->h + 12), 6);
-            nvgStrokeColor(vg, ui::rgb(ui::primary, pin ? 50 : 140));
+            ui::stroke(vg, ui::rgb(ui::primary, pin ? 50 : 140));
             nvgStrokeWidth(vg, 3);
             nvgStroke(vg);
             if (pin) {
                 for (Vec2 m : edge_mids(*r)) { // snap targets
                     nvgBeginPath(vg);
                     nvgCircle(vg, float(m.x), float(m.y), 3);
-                    nvgFillColor(vg, ui::rgb(ui::primary, 90));
+                    ui::fill(vg, ui::rgb(ui::primary, 90));
                     nvgFill(vg);
                 }
                 nvgBeginPath(vg);
                 nvgCircle(vg, float(pin->x), float(pin->y), 5.5f);
-                nvgFillColor(vg, nvgRGB(255, 255, 255));
+                ui::fill(vg, nvgRGB(255, 255, 255));
                 nvgFill(vg);
-                nvgStrokeColor(vg, ui::rgb(ui::primary, 255));
+                ui::stroke(vg, ui::rgb(ui::primary, 255));
                 nvgStrokeWidth(vg, 2);
                 nvgStroke(vg);
             }
@@ -2863,9 +2873,9 @@ void App::draw_overlay() {
         Rect b = Rect::from_points(drag_start_, mouse_);
         nvgBeginPath(vg);
         nvgRect(vg, float(b.x), float(b.y), float(b.w), float(b.h));
-        nvgFillColor(vg, ui::rgb(ui::primary, 20));
+        ui::fill(vg, ui::rgb(ui::primary, 20));
         nvgFill(vg);
-        nvgStrokeColor(vg, accent);
+        ui::stroke(vg, accent);
         nvgStrokeWidth(vg, 1);
         nvgStroke(vg);
     }
@@ -2889,7 +2899,7 @@ void App::draw_overlay() {
                     double w = B.x - A.x + (newline ? A.h * 0.3 : 0);
                     nvgBeginPath(vg);
                     nvgRect(vg, float(A.x), float(A.y), float(std::max(w, 1.0)), float(A.h));
-                    nvgFillColor(vg, ui::rgb(ui::primary, 70));
+                    ui::fill(vg, ui::rgb(ui::primary, 70));
                     nvgFill(vg);
                 }
             }
@@ -2899,7 +2909,7 @@ void App::draw_overlay() {
                     nvgBeginPath(vg);
                     nvgRect(vg, float(c.x), float(c.y + c.h * 0.08),
                             float(std::max(1.0, c.h / 20)), float(c.h * 0.84));
-                    nvgFillColor(vg, accent);
+                    ui::fill(vg, accent);
                     nvgFill(vg);
                 }
             } else {
@@ -2910,7 +2920,7 @@ void App::draw_overlay() {
                 }
                 nvgBeginPath(vg);
                 nvgRect(vg, float(c.x), float(c.y + c.h * 0.08), float(w), float(c.h * 0.84));
-                nvgFillColor(vg, ui::rgb(ui::primary, 110));
+                ui::fill(vg, ui::rgb(ui::primary, 110));
                 nvgFill(vg);
             }
         }
@@ -3264,10 +3274,12 @@ void App::draw_ui() {
     }
 
     {
-        Rect r{win_w_ - 16.0 - 150 - 8 - 44, 16, 44, 44};
+        Rect r{win_w_ - 16.0 - 150 - 8 - 80, 16, 80, 44};
         ui::island(vg, r);
         add_hit(r, nullptr);
-        button({r.x + 6, r.y + 6, 32, 32}, ui::Icon::Search, search_open_,
+        button({r.x + 6, r.y + 6, 32, 32}, ui::dark ? ui::Icon::Sun : ui::Icon::Moon, false,
+               [this] { toggle_theme(); });
+        button({r.x + 42, r.y + 6, 32, 32}, ui::Icon::Search, search_open_,
                [this] { search_open_ ? close_search() : open_search(); });
     }
 
@@ -3324,7 +3336,7 @@ void App::draw_ui() {
         Rect r{(win_w_ - tw2) / 2, win_h_ - 16.0 - 40, tw2, 40};
         nvgBeginPath(vg);
         nvgRoundedRect(vg, float(r.x), float(r.y), float(r.w), float(r.h), 8);
-        nvgFillColor(vg, ui::rgb(0x1b1b1f, 235));
+        ui::fill(vg, ui::rgb(0x1b1b1f, 235));
         nvgFill(vg);
         ui::label(vg, toast_, r.center().x, r.center().y, 13, nvgRGB(255, 255, 255),
                   true, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);

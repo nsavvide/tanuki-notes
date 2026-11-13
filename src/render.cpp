@@ -4,6 +4,7 @@
 #include "note.hpp"
 #include "assets.hpp"
 #include "rough.hpp"
+#include "ui.hpp"
 
 #include <nanovg.h>
 
@@ -183,7 +184,7 @@ static void draw_code(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     nvgBeginPath(vg);
     nvgRoundedRect(vg, float(r.x), float(r.y), float(r.w), float(r.h),
                    float(std::min(px * 0.6, r.w * 0.05)));
-    nvgFillColor(vg, color((code::background << 8) | 0xff, alpha));
+    ui::fill(vg, color((code::background << 8) | 0xff, alpha));
     nvgFill(vg);
     if (px < 1) {
         return;
@@ -342,7 +343,7 @@ static void draw_note(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     auto rect = [&](double x, double y, double w, double h, NVGcolor c, double radius = 0) {
         nvgBeginPath(vg);
         nvgRoundedRect(vg, float(x), float(y), float(w), float(h), float(radius));
-        nvgFillColor(vg, c);
+        ui::fill(vg, c);
         nvgFill(vg);
     };
 
@@ -361,11 +362,11 @@ static void draw_note(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
                 nvgCircle(vg, float(cx), float(cy), float(r));
             }
             if (d.level % 3 == 1) {
-                nvgStrokeColor(vg, ink);
+                ui::stroke(vg, ink);
                 nvgStrokeWidth(vg, float(std::max(1.0, 0.07 * em)));
                 nvgStroke(vg);
             } else {
-                nvgFillColor(vg, ink);
+                ui::fill(vg, ink);
                 nvgFill(vg);
             }
             break;
@@ -381,18 +382,18 @@ static void draw_note(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
             nvgBeginPath(vg);
             nvgRoundedRect(vg, float(x), float(y), float(s), float(s), float(0.15 * em));
             if (d.checked) {
-                nvgFillColor(vg, color(0x2383e2ff, alpha));
+                ui::fill(vg, color(0x2383e2ff, alpha));
                 nvgFill(vg);
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, float(x + s * 0.24), float(y + s * 0.52));
                 nvgLineTo(vg, float(x + s * 0.42), float(y + s * 0.7));
                 nvgLineTo(vg, float(x + s * 0.76), float(y + s * 0.32));
-                nvgStrokeColor(vg, nvgRGBAf(1, 1, 1, alpha));
+                ui::stroke(vg, nvgRGBAf(1, 1, 1, alpha));
                 nvgStrokeWidth(vg, float(std::max(1.0, 0.11 * em)));
                 nvgLineCap(vg, NVG_ROUND);
                 nvgStroke(vg);
             } else {
-                nvgStrokeColor(vg, ink);
+                ui::stroke(vg, ink);
                 nvgStrokeWidth(vg, float(std::max(1.0, 0.08 * em)));
                 nvgStroke(vg);
             }
@@ -469,7 +470,7 @@ static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
                 nvgBeginPath(ctx.vg);
                 nvgRect(ctx.vg, float(L.line_x[i] - padx), float(L.top + i * lh),
                         float(w + 2 * padx), float(lh));
-                nvgFillColor(ctx.vg, color(behind_color(n), alpha));
+                ui::fill(ctx.vg, color(behind_color(n), alpha));
                 nvgFill(ctx.vg);
             }
         }
@@ -491,7 +492,7 @@ static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
                 nvgBeginPath(ctx.vg);
                 nvgRect(ctx.vg, float(x), float(y + L.px * 1.12), float(w),
                         float(std::max(1.0, L.px / 18)));
-                nvgFillColor(ctx.vg, lc);
+                ui::fill(ctx.vg, lc);
                 nvgFill(ctx.vg);
             }
             x += w;
@@ -536,7 +537,7 @@ static void fill_shape(RenderCtx& ctx, const Node& n,
             }
         }
         nvgClosePath(vg);
-        nvgFillColor(vg, fc);
+        ui::fill(vg, fc);
         nvgFill(vg);
         return;
     }
@@ -547,13 +548,13 @@ static void fill_shape(RenderCtx& ctx, const Node& n,
     if (n.style.fill_style == FillStyle::CrossHatch) {
         rough::hachure(vg, poly, sw * 4, 49, ctx.viewport, o, rng);
     }
-    nvgStrokeColor(vg, fc);
+    ui::stroke(vg, fc);
     nvgStrokeWidth(vg, float(std::max(sw / 2, 0.5)));
     nvgStroke(vg);
 }
 
 static void stroke_style(NVGcontext* vg, const Node& n, double sw, float alpha) {
-    nvgStrokeColor(vg, color(n.style.stroke, alpha));
+    ui::stroke(vg, color(n.style.stroke, alpha));
     nvgStrokeWidth(vg, float(std::max(sw, 0.5)));
     nvgLineCap(vg, NVG_ROUND);
     nvgLineJoin(vg, NVG_ROUND);
@@ -669,7 +670,7 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
                                              float(r.w), float(r.h), 0,
                                              tex->handle, alpha));
         } else {
-            nvgFillColor(vg, nvgRGBA(233, 236, 239, (unsigned char)(255 * alpha)));
+            ui::fill(vg, nvgRGBA(233, 236, 239, (unsigned char)(255 * alpha)));
         }
         nvgFill(vg);
         break;
@@ -678,9 +679,9 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         float rad = float(std::min(r.w, r.h) * 0.015);
         nvgBeginPath(vg);
         nvgRoundedRect(vg, float(r.x), float(r.y), float(r.w), float(r.h), rad);
-        nvgFillColor(vg, nvgRGBA(241, 243, 245, (unsigned char)(255 * alpha)));
+        ui::fill(vg, nvgRGBA(241, 243, 245, (unsigned char)(255 * alpha)));
         nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(222, 226, 230, (unsigned char)(255 * alpha)));
+        ui::stroke(vg, nvgRGBA(222, 226, 230, (unsigned char)(255 * alpha)));
         nvgStrokeWidth(vg, 1);
         nvgStroke(vg);
         break;
@@ -688,7 +689,7 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     case Kind::PdfPage: {
         nvgBeginPath(vg);
         nvgRect(vg, float(r.x), float(r.y), float(r.w), float(r.h));
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(255 * alpha)));
+        ui::fill(vg, nvgRGBA(255, 255, 255, (unsigned char)(255 * alpha)));
         nvgFill(vg);
         const Texture* tex =
             ctx.assets.pdf_page(n.asset, n.page, r.w * ctx.pixel_ratio);
@@ -698,13 +699,15 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
                                              tex->handle, alpha));
             nvgFill(vg);
         }
-        nvgStrokeColor(vg, nvgRGBA(206, 212, 218, (unsigned char)(255 * alpha)));
+        ui::stroke(vg, nvgRGBA(206, 212, 218, (unsigned char)(255 * alpha)));
         nvgStrokeWidth(vg, 1);
         nvgStroke(vg);
         break;
     }
     case Kind::Code:
+        ui::unthemed = true; // code cards are dark already
         draw_code(ctx, n, t, alpha);
+        ui::unthemed = false;
         break;
     case Kind::Text:
     case Kind::Root:
@@ -730,7 +733,7 @@ void draw_subtree(RenderCtx& ctx, const Node& n, Xform t) {
         nvgBeginPath(ctx.vg);
         nvgRect(ctx.vg, float(r.x), float(r.y), float(std::max(r.w, 1.0)),
                 float(std::max(r.h, 1.0)));
-        nvgFillColor(ctx.vg, color(n.style.stroke, 0.5f * alpha));
+        ui::fill(ctx.vg, color(n.style.stroke, 0.5f * alpha));
         nvgFill(ctx.vg);
         return;
     }

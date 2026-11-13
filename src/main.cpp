@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "text.hpp"
+#include "ui.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -57,7 +58,7 @@ int snapshot(NVGcontext* vg, SDL_Window* window, App& app, const char* out) {
     for (int i = 0; i < 40; ++i) {
         nvgluBindFramebuffer(fb);
         glViewport(0, 0, w, h);
-        glClearColor(1, 1, 1, 1);
+        glClearColor(ui::dark ? 0.07f : 1, ui::dark ? 0.07f : 1, ui::dark ? 0.07f : 1, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
         app.update(i / 60.0, w, h);
         app.render(1);
@@ -131,6 +132,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!selftest) {
+        ui::load_theme(SDL_GetSystemTheme() == SDL_SYSTEM_THEME_DARK);
+    }
     int code = 0;
     if (selftest) {
         code = run_selftest(vg, window);
@@ -220,7 +224,7 @@ int main(int argc, char** argv) {
             app.update(SDL_GetTicks() / 1000.0, w, h);
 
             glViewport(0, 0, pw, ph);
-            glClearColor(1, 1, 1, 1);
+            glClearColor(ui::dark ? 0.07f : 1, ui::dark ? 0.07f : 1, ui::dark ? 0.07f : 1, 1);
             glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             app.render(w > 0 ? float(pw) / float(w) : 1.0f);
             SDL_GL_SwapWindow(window);
