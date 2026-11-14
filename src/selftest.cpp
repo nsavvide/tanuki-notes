@@ -293,6 +293,27 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         fs::remove_all(proj);
     }
 
+    // Opening a folder that isn't a map (e.g. a code repo) leaves it alone;
+    // once it is one, its own .gitignore lines are kept.
+    {
+        fs::path d = dir;
+        d += "-repo";
+        fs::remove_all(d);
+        fs::create_directories(d);
+        std::ofstream(d / ".gitignore") << "build/";
+        Node empty;
+        store::save(empty, d);
+        store::save_view(d, {});
+        CHECK(!fs::exists(d / "board.json") && !fs::exists(d / ".view.json"));
+        auto map = store::load(d);
+        map->children.push_back(std::make_unique<Node>());
+        store::save(*map, d);
+        std::ifstream in(d / ".gitignore");
+        std::string gi((std::istreambuf_iterator<char>(in)), {});
+        CHECK(gi == "build/\n.view.json\n*.tmp\n");
+        fs::remove_all(d);
+    }
+
     // Double-click: blank shape -> edit label; shape with content -> dive in;
     // mouse back button -> out again.
     {

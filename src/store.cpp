@@ -76,14 +76,40 @@ static void collect(const Node& node, const fs::path& folder,
     files.emplace_back(folder / "board.json", board.dump(2) + "\n");
 }
 
+// Adds our lines to the folder's .gitignore, keeping whatever is already there
+// (the map may live inside a code repo).
+static void ensure_gitignore(const fs::path& dir) {
+    fs::path p = dir / ".gitignore";
+    std::string s = fs::exists(p) ? read_file(p) : "";
+    std::set<std::string> have;
+    std::istringstream in(s);
+    for (std::string line; std::getline(in, line);) {
+        have.insert(line);
+    }
+    std::string out = s;
+    for (const char* line : {".view.json", "*.tmp"}) {
+        if (!have.contains(line)) {
+            if (!out.empty() && out.back() != '\n') {
+                out += '\n';
+            }
+            out += std::string(line) + "\n";
+        }
+    }
+    write_if_changed(p, out);
+}
+
 void save(const Node& root, const fs::path& dir) {
+    // Just looking around a folder that isn't a map leaves no files behind.
+    if (root.children.empty() && !fs::exists(dir / "board.json")) {
+        return;
+    }
     std::vector<std::pair<fs::path, std::string>> files;
     std::set<fs::path> folders;
     collect(root, dir, files, folders);
     for (const auto& [path, content] : files) {
         write_if_changed(path, content);
     }
-    write_if_changed(dir / ".gitignore", ".view.json\n*.tmp\n");
+    ensure_gitignore(dir);
 
     // Remove board folders of nodes that no longer exist. Only touches
     // folders that contain a board.json, never assets or .git.
@@ -147,6 +173,9 @@ View load_view(const fs::path& dir) {
 }
 
 void save_view(const fs::path& dir, const View& v) {
+    if (!fs::exists(dir / "board.json")) {
+        return;
+    }
     json j = {{"anchor", v.anchor_id},
               {"x", v.camera.x},
               {"y", v.camera.y},
