@@ -9,6 +9,7 @@
 #include <nanovg.h>
 
 #include <algorithm>
+#include <cmath>
 #include <string_view>
 
 static NVGcolor color(uint32_t c, float alpha = 1) {
@@ -560,6 +561,98 @@ static void stroke_style(NVGcontext* vg, const Node& n, double sw, float alpha) 
     nvgLineJoin(vg, NVG_ROUND);
 }
 
+// Clean dashes or dots along `pts`. Only the part inside `view` is emitted,
+// so a long edge zoomed far in stays cheap.
+static void dash_path(NVGcontext* vg, const std::vector<Vec2>& pts, bool closed, int dash,
+                      double sw, Rect view) {
+    double on = dash == 1 ? std::max(sw * 5, 6.0) : std::max(sw * 0.1, 0.3);
+    double off = dash == 1 ? std::max(sw * 3.5, 4.0) : std::max(sw * 2.5, 3.0);
+    double period = on + off, phase = 0;
+    Rect v = view.expanded(sw * 2 + period);
+    int budget = 20000; // ponytail: caps dashes per shape; beyond it the line just stops
+    size_t n = pts.size(), segs = closed ? n : n - 1;
+    for (size_t i = 0; n >= 2 && i < segs; ++i) {
+        Vec2 a = pts[i], b = pts[(i + 1) % n];
+        double len = length(b - a);
+        if (len <= 0) {
+            continue;
+        }
+        Vec2 d = (b - a) * (1 / len);
+        // Clip the segment to the view (Liang-Barsky): t in [t0, t1].
+        double t0 = 0, t1 = len;
+        auto clip = [&](double p, double q) {
+            if (std::abs(p) < 1e-12) {
+                return q >= 0;
+            }
+            double r = q / p;
+            if (p < 0) {
+                t0 = std::max(t0, r);
+            } else {
+                t1 = std::min(t1, r);
+            }
+            return t0 <= t1;
+        };
+        bool vis = clip(-d.x, a.x - v.x) && clip(d.x, v.right() - a.x) &&
+                   clip(-d.y, a.y - v.y) && clip(d.y, v.bottom() - a.y);
+        if (!vis) {
+            phase = std::fmod(phase + len, period);
+            continue;
+        }
+        phase = std::fmod(phase + t0, period);
+        double t = t0;
+        while (t < t1 && budget-- > 0) {
+            bool drawing = phase < on;
+            double step = drawing ? on - phase : period - phase;
+            bool reached = t + step <= t1; // this dash or gap ends inside the segment
+            double e = reached ? t + step : t1;
+            if (drawing) {
+                Vec2 p = a + d * t, q = a + d * e;
+                nvgMoveTo(vg, float(p.x), float(p.y));
+                nvgLineTo(vg, float(q.x), float(q.y));
+            }
+            // Land exactly on the dash boundary: summing rounded steps can
+            // stall a hair short of it and loop until the budget runs out.
+            phase = reached ? (drawing ? on : 0) : phase + (e - t);
+            t = e;
+        }
+        phase = std::fmod(phase + (len - t1), period);
+    }
+}
+
+// Halo behind a shape that's part of the focused concept.
+static void draw_glow(RenderCtx& ctx, const Node& n, Xform t) {
+    NVGcontext* vg = ctx.vg;
+    Rect r = screen_rect(n, t);
+    double sw = std::max(n.style.stroke_width * parent_scale(n, t), 1.0);
+    double pad = sw + 3;
+    nvgBeginPath(vg);
+    if (n.kind == Kind::Ellipse) {
+        Vec2 c = r.center();
+        nvgEllipse(vg, float(c.x), float(c.y), float(r.w / 2 + pad), float(r.h / 2 + pad));
+    } else if (n.kind == Kind::Diamond) {
+        auto pts = rough::diamond_points(r.expanded(pad));
+        nvgMoveTo(vg, float(pts[0].x), float(pts[0].y));
+        for (size_t i = 1; i < pts.size(); ++i) {
+            nvgLineTo(vg, float(pts[i].x), float(pts[i].y));
+        }
+        nvgClosePath(vg);
+    } else if (n.kind == Kind::Line || n.kind == Kind::Arrow) {
+        auto pts = path_points(n, t);
+        for (size_t i = 0; i < pts.size(); ++i) {
+            i ? nvgLineTo(vg, float(pts[i].x), float(pts[i].y))
+              : nvgMoveTo(vg, float(pts[i].x), float(pts[i].y));
+        }
+    } else {
+        Rect e = r.expanded(pad);
+        nvgRoundedRect(vg, float(e.x), float(e.y), float(e.w), float(e.h), float(pad));
+    }
+    ui::stroke(vg, color(ctx.glow_color, 0.4f));
+    nvgStrokeWidth(vg, float(sw * 3 + 8));
+    nvgLineCap(vg, NVG_ROUND);
+    nvgLineJoin(vg, NVG_ROUND);
+    nvgStroke(vg);
+}
+
 static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
     NVGcontext* vg = ctx.vg;
     Rect r = screen_rect(n, t);
@@ -573,7 +666,11 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         fill_shape(ctx, n, pts, sw, alpha);
         if (sw > 0) {
             nvgBeginPath(vg);
-            rough::polygon(vg, pts, o, rng);
+            if (n.style.dash) {
+                dash_path(vg, pts, true, n.style.dash, sw, ctx.viewport);
+            } else {
+                rough::polygon(vg, pts, o, rng);
+            }
             stroke_style(vg, n, sw, alpha);
             nvgStroke(vg);
         }
@@ -584,7 +681,11 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         fill_shape(ctx, n, pts, sw, alpha);
         if (sw > 0) {
             nvgBeginPath(vg);
-            rough::polygon(vg, pts, o, rng);
+            if (n.style.dash) {
+                dash_path(vg, pts, true, n.style.dash, sw, ctx.viewport);
+            } else {
+                rough::polygon(vg, pts, o, rng);
+            }
             stroke_style(vg, n, sw, alpha);
             nvgStroke(vg);
         }
@@ -595,7 +696,12 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         fill_shape(ctx, n, rough::ellipse_points(r, segs), sw, alpha);
         if (sw > 0) {
             nvgBeginPath(vg);
-            rough::ellipse(vg, r, o, rng);
+            if (n.style.dash) {
+                dash_path(vg, rough::ellipse_points(r, segs), true, n.style.dash, sw,
+                          ctx.viewport);
+            } else {
+                rough::ellipse(vg, r, o, rng);
+            }
             stroke_style(vg, n, sw, alpha);
             nvgStroke(vg);
         }
@@ -608,7 +714,9 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
             break;
         }
         nvgBeginPath(vg);
-        if (n.points.size() > 2) { // a curve: drawn smooth, rough would kink it
+        if (n.style.dash) {
+            dash_path(vg, pts, false, n.style.dash, sw, ctx.viewport);
+        } else if (n.points.size() > 2) { // a curve: drawn smooth, rough would kink it
             nvgMoveTo(vg, float(pts[0].x), float(pts[0].y));
             for (size_t i = 1; i < pts.size(); ++i) {
                 nvgLineTo(vg, float(pts[i].x), float(pts[i].y));
@@ -620,18 +728,29 @@ static void draw_shape(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         }
         if (n.kind == Kind::Arrow) {
             // On a curve, aim along the last bit of it, not one tiny sample.
-            Vec2 tip = pts.back();
-            Vec2 from = pts[pts.size() - 1 - (n.points.size() > 2 ? curve_steps / 4 : 1)];
-            Vec2 d = tip - from;
-            double len = length(d);
-            if (len > 0) {
+            size_t back = n.points.size() > 2 ? curve_steps / 4 : 1;
+            auto head_at = [&](Vec2 tip, Vec2 from) {
+                Vec2 d = tip - from;
+                double len = length(d);
+                if (len <= 0) {
+                    return;
+                }
                 double head = std::min(len * 0.4, std::max(sw * 10, 8.0));
                 double ang = std::atan2(d.y, d.x);
                 for (double side : {-0.5, 0.5}) {
                     Vec2 end{tip.x - head * std::cos(ang + side),
                              tip.y - head * std::sin(ang + side)};
-                    rough::line(vg, end, tip, o, rng);
+                    if (n.style.dash) { // heads stay solid on dashed arrows
+                        nvgMoveTo(vg, float(end.x), float(end.y));
+                        nvgLineTo(vg, float(tip.x), float(tip.y));
+                    } else {
+                        rough::line(vg, end, tip, o, rng);
+                    }
                 }
+            };
+            head_at(pts.back(), pts[pts.size() - 1 - back]);
+            if (n.style.start_arrow) {
+                head_at(pts.front(), pts[std::min(back, pts.size() - 1)]);
             }
         }
         stroke_style(vg, n, sw, alpha);
@@ -727,6 +846,11 @@ void draw_subtree(RenderCtx& ctx, const Node& n, Xform t) {
         return;
     }
     float alpha = ctx.faded.contains(&n) ? 0.3f : 1.0f;
+    if (ctx.focus && !ctx.lit.contains(&n)) {
+        alpha = 0.12f;
+    } else if (!ctx.focus && n.is_linear() && !n.tags.empty()) {
+        alpha = 0.25f; // concept arrows stay quiet until their concept is picked
+    }
 
     if (n.kind != Kind::Root && r.w < 3 && r.h < 3) {
         // A dot: shape detail is invisible at this size anyway.
@@ -738,6 +862,9 @@ void draw_subtree(RenderCtx& ctx, const Node& n, Xform t) {
         return;
     }
 
+    if (ctx.focus && ctx.glow.contains(&n)) {
+        draw_glow(ctx, n, t);
+    }
     draw_shape(ctx, n, t, alpha);
 
     if (!n.children.empty()) {

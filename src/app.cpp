@@ -11,7 +11,10 @@
 
 #include <cmath>
 #include <format>
+#include <fstream>
 #include <map>
+#include <print>
+#include <sstream>
 #include <unordered_map>
 
 namespace fs = std::filesystem;
@@ -251,6 +254,7 @@ App::App(NVGcontext* vg, SDL_Window* window, fs::path map_dir)
     refit(*root_);
     anchor_ = root_.get();
     SDL_GetWindowSize(window_, &win_w_, &win_h_);
+    sync_diagrams(true);
 
     store::View view = store::load_view(dir_);
     Node* a = view.valid ? find_by_id(*root_, view.anchor_id) : nullptr;
@@ -1556,6 +1560,200 @@ std::vector<Vec2> App::bend_handles(const Node& n, Xform t) const {
     return out;
 }
 
+void App::sync_diagrams(bool startup) {
+    last_scan_ = now_;
+    if (editing_ || drag_ != Drag::None) {
+        return; // pointers into the tree are live; try again in a moment
+    }
+    std::error_code ec;
+    std::vector<fs::path> files;
+    for (const auto& e : fs::directory_iterator(dir_, ec)) {
+        if (e.path().extension() == ".tanuki") {
+            files.push_back(e.path());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    bool changed = false;
+    for (const auto& f : files) {
+        auto mtime = fs::last_write_time(f, ec);
+        std::string name = f.filename().string();
+        if (ec || (diagram_mtimes_.contains(name) && diagram_mtimes_[name] == mtime)) {
+            continue;
+        }
+        diagram_mtimes_[name] = mtime;
+        std::ifstream in(f, std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        auto res = diagram::build(vg_, ss.str(), name);
+        if (!res.frame) {
+            diagram_error_ = name + ", " + res.error;
+            std::println(stderr, "tanuki-notes: {}", diagram_error_);
+            toast(diagram_error_);
+            continue;
+        }
+        diagram_error_.clear();
+        concepts_[name] = std::move(res.concepts);
+        place_diagram(std::move(res.frame));
+        changed = true;
+        if (!startup) {
+            toast("Updated from " + name);
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    selection_.clear();
+    if (startup) {
+        mark_dirty();
+    } else {
+        commit();
+    }
+}
+
+// Puts a freshly built diagram frame in the tree: in place of its previous
+// version (keeping where and how big the frame is, and anything drawn by
+// hand inside it), or to the right of everything at the top level.
+void App::place_diagram(std::unique_ptr<Node> frame) {
+    Node* old = find_by_id(*root_, frame->id);
+    double aspect = frame->h, w;
+    if (old) {
+        frame->x = old->x;
+        frame->y = old->y;
+        w = old->w;
+    } else {
+        double x1 = -1e300, y0 = 1e300, wmax = 0;
+        for (auto& c : root_->children) {
+            x1 = std::max(x1, c->x + c->w);
+            y0 = std::min(y0, c->y);
+            wmax = std::max(wmax, c->w);
+        }
+        w = std::max(wmax, 0.001);
+        frame->x = root_->children.empty() ? 0.5 - w / 2 : x1 + w * 0.15;
+        frame->y = root_->children.empty() ? 0.5 - w * aspect / 2 : y0;
+    }
+    frame->w = w;
+    frame->h = aspect * w;
+    frame->style.font_size *= w;
+    frame->style.stroke_width *= w;
+    if (!old) {
+        add_child(*root_, std::move(frame));
+        return;
+    }
+
+    std::vector<std::pair<std::string, std::unique_ptr<Node>>> kept;
+    std::function<void(Node&)> walk = [&](Node& n) {
+        for (size_t i = 0; i < n.children.size();) {
+            Node& c = *n.children[i];
+            if (c.src.empty()) {
+                kept.emplace_back(n.id, detach(c));
+            } else {
+                walk(c);
+                ++i;
+            }
+        }
+    };
+    walk(*old);
+    for (auto& [pid, n] : kept) {
+        Node* p = find_by_id(*frame, pid);
+        add_child(p ? *p : *frame, std::move(n));
+    }
+    std::string anchor_id = anchor_->id;
+    Node* parent = old->parent;
+    frame->parent = parent;
+    parent->children[size_t(index_in_parent(*old))] = std::move(frame); // frees old
+    anchor_ = find_by_id(*root_, anchor_id);
+    if (!anchor_) { // we were inside a box that's gone
+        anchor_ = root_.get();
+        cam_.scale = initial_root_px;
+        cam_.x = 0.5 - win_w_ / 2.0 / cam_.scale;
+        cam_.y = 0.5 - win_h_ / 2.0 / cam_.scale;
+        fly_to(parent);
+    }
+}
+
+std::vector<const diagram::Concept*> App::all_concepts() const {
+    std::vector<const diagram::Concept*> out;
+    for (const auto& [file, list] : concepts_) {
+        for (const auto& c : list) {
+            out.push_back(&c);
+        }
+    }
+    return out;
+}
+
+void App::cycle_concept() {
+    auto list = all_concepts();
+    size_t i = 0;
+    while (i < list.size() && list[i]->id != focus_) {
+        ++i;
+    }
+    // none -> first -> ... -> last -> none
+    focus_ = focus_.empty() ? (list.empty() ? "" : list[0]->id)
+             : i + 1 < list.size() ? list[i + 1]->id
+                                   : "";
+    for (const auto* c : list) {
+        if (c->id == focus_) {
+            toast(c->name);
+        }
+    }
+}
+
+// Concepts of the diagrams, top right: click one (or press C) to light up
+// everything that belongs to it.
+void App::draw_concepts() {
+    auto list = all_concepts();
+    if (list.empty()) {
+        return;
+    }
+    NVGcontext* vg = vg_;
+    double w = 240, x = win_w_ - 16.0 - w, y = 72, row = 30;
+    const diagram::Concept* active = nullptr;
+    for (const auto* c : list) {
+        if (c->id == focus_) {
+            active = c;
+        }
+    }
+    std::string note = active ? active->note : "";
+    std::erase_if(note, [](char c) { return c == '*' || c == '`'; }); // plain text here
+    float note_h = 0;
+    if (!note.empty()) {
+        nvgFontFace(vg, "ui");
+        nvgFontSize(vg, 12.5f);
+        nvgTextLineHeight(vg, 1.35f);
+        float b[4];
+        nvgTextBoxBounds(vg, 0, 0, float(w - 24), note.c_str(), nullptr, b);
+        note_h = b[3] - b[1] + 12;
+    }
+    Rect panel{x, y, w, 12 + 18 + list.size() * row + 6 + note_h};
+    ui::island(vg, panel);
+    add_hit(panel, nullptr);
+    ui::label(vg, "Concepts  (C)", x + 12, y + 18, 11.5f, ui::rgb(0x495057));
+    double ry = y + 30;
+    for (const auto* c : list) {
+        Rect r{x + 6, ry, w - 12, row - 2};
+        bool on = c == active;
+        ui::button_bg(vg, r, on, r.contains(mouse_));
+        nvgBeginPath(vg);
+        nvgCircle(vg, float(r.x + 14), float(r.center().y), 5);
+        ui::fill(vg, nvgRGBA((c->color >> 24) & 0xff, (c->color >> 16) & 0xff,
+                             (c->color >> 8) & 0xff, 255));
+        nvgFill(vg);
+        ui::label(vg, c->name, r.x + 28, r.center().y, 13,
+                  ui::rgb(on ? ui::primary : ui::ink), on);
+        std::string id = c->id;
+        add_hit(r, [this, id] { focus_ = focus_ == id ? "" : id; });
+        ry += row;
+    }
+    if (note_h > 0) {
+        nvgFontFace(vg, "ui");
+        nvgFontSize(vg, 12.5f);
+        nvgTextLineHeight(vg, 1.35f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        ui::fill(vg, ui::rgb(0x495057));
+        nvgTextBox(vg, float(x + 12), float(ry + 8), float(w - 24), note.c_str(), nullptr);
+    }
+}
+
 void App::toggle_theme() {
     ui::dark = !ui::dark;
     ui::save_theme();
@@ -1628,7 +1826,10 @@ void App::update_bindings() {
         }
         auto pts = screen_points(*n, *t);
         Vec2 p0 = pts.front(), p1 = pts.back();
-        double gap = std::max(4.0, n->style.stroke_width * tp->s * 2);
+        // Twice the stroke width, in the arrow's own units rather than pixels:
+        // a fixed pixel gap stretched arrows in levels that were tiny on
+        // screen, and rewrote them every time the map was opened.
+        double gap = 2 * n->style.stroke_width * tp->s;
         auto pin = [](const std::pair<Node*, Rect>& s, Vec2 at) {
             const Rect& r = s.second;
             return at.x < 0 ? r.center() : Vec2{r.x + at.x * r.w, r.y + at.y * r.h};
@@ -1649,7 +1850,9 @@ void App::update_bindings() {
         if (b) {
             p1 = place(*b, n->end_at, aim1, p1);
         }
-        if (length(p0 - pts.front()) < 0.01 && length(p1 - pts.back()) < 0.01) {
+        // Moves this small are rounding from another zoom: leave the file be.
+        double tol = std::max(0.01, 1e-4 * length(pts.back() - pts.front()));
+        if (length(p0 - pts.front()) < tol && length(p1 - pts.back()) < tol) {
             continue;
         }
         pts.front() = p0;
@@ -2637,6 +2840,7 @@ void App::key_down(SDL_Keycode key, Mods m) {
     case SDLK_SLASH:
         open_search();
         return;
+    case SDLK_C: cycle_concept(); return;
     case SDLK_H: set_tool(Tool::Hand); return;
     case SDLK_V: set_tool(Tool::Select); return;
     case SDLK_R: set_tool(Tool::Rect); return;
@@ -2722,6 +2926,9 @@ void App::update(double now, int win_w, int win_h) {
         pending_link_.clear();
         follow_link(title);
     }
+    if (now_ - last_scan_ >= 0.5) {
+        sync_diagrams(false);
+    }
     refit_editing();
     step_fly(dt);
     clamp_zoom();
@@ -2746,6 +2953,31 @@ void App::render(float pixel_ratio) {
     ctx.caret = caret_;
     for (Node* n : erasing_) {
         ctx.faded.insert(n);
+    }
+    if (!focus_.empty()) {
+        for (const auto* c : all_concepts()) {
+            if (c->id == focus_) {
+                ctx.glow_color = c->color;
+            }
+        }
+        // Tagged nodes glow; they, everything inside them and every shape on
+        // the way down to them stay bright.
+        std::function<bool(const Node&, bool)> walk = [&](const Node& n, bool inside) {
+            bool tagged = std::find(n.tags.begin(), n.tags.end(), focus_) != n.tags.end();
+            if (tagged) {
+                ctx.glow.insert(&n);
+            }
+            bool lit = tagged || inside;
+            for (const auto& c : n.children) {
+                lit |= walk(*c, inside || tagged);
+            }
+            if (lit) {
+                ctx.lit.insert(&n);
+            }
+            return lit;
+        };
+        walk(*root_, false);
+        ctx.focus = true;
     }
     auto [n, t] = draw_root();
     draw_subtree(ctx, *n, t);
@@ -3011,6 +3243,7 @@ void App::draw_style_panel() {
     uint32_t fill = first ? first->style.fill : style_.fill;
     FillStyle fill_style = first ? first->style.fill_style : style_.fill_style;
     int roughness = first ? first->style.roughness : style_.roughness;
+    int dash = first ? first->style.dash : style_.dash;
     double sw_px = stroke_px_, font_px = font_px_;
     if (first) {
         if (auto tp = xform_of(first->parent)) {
@@ -3030,7 +3263,7 @@ void App::draw_style_panel() {
     // Sections are 58 px tall, except the color grids.
     constexpr double stroke_h = 18 + 28 + 2 * 17 + 12, bg_h = 18 + 28 + 3 * 17 + 12;
     double x = 16, y = 72, w = 236;
-    double rows = 2 + (has_shape ? 1 : 0) + (has_text ? 1 : 0) + (first ? 1 : 0);
+    double rows = 3 + (has_shape ? 1 : 0) + (has_text ? 1 : 0) + (first ? 1 : 0);
     double h = 16 + rows * 58 + stroke_h + (has_shape ? bg_h : 0);
     ui::island(vg, {x, y, w, h});
     add_hit({x, y, w, h}, nullptr);
@@ -3126,6 +3359,17 @@ void App::draw_style_panel() {
                        }
                    });
                });
+    }
+    cy += 40;
+
+    section("Stroke style");
+    const char* dash_names[3] = {"\u2014", "- -", "\u00b7\u00b7\u00b7"};
+    for (int i = 0; i < 3; ++i) {
+        Rect r{cx + i * 36, cy, 32, 32};
+        ui::button_bg(vg, r, dash == i, r.contains(mouse_));
+        ui::label(vg, dash_names[i], r.center().x, r.center().y, 13, ui::rgb(ui::ink), true,
+                  NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        add_hit(r, [=] { set_style([i](Style& s) { s.dash = i; }); });
     }
     cy += 40;
 
@@ -3286,6 +3530,7 @@ void App::draw_ui() {
     if (style_panel_visible()) {
         draw_style_panel();
     }
+    draw_concepts();
 
     // Zoom level + undo/redo, bottom left.
     {

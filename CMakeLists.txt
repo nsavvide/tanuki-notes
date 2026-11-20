@@ -39,6 +39,7 @@ add_executable(tanuki-notes
     src/app.cpp
     src/assets.cpp
     src/code.cpp
+    src/diagram.cpp
     src/node.cpp
     src/note.cpp
     src/render.cpp

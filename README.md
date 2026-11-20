@@ -35,6 +35,7 @@ folder or `/` into a map.
 | Jump to a parent | click it in the breadcrumb (top left) |
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
 | Attach an arrow | start or end it on a shape; it follows when the shape moves or resizes |
+| Highlight a concept | C cycles through them, or click one in the Concepts panel |
 | Dark mode | moon/sun button top right, or Shift+Alt+D; follows the system theme until you pick one |
 | Pin an arrow to a spot | drop its end on or near the outline: it stays on that exact spot (snaps to edge midpoints); drop it deep inside to aim at the center |
 | Detach an arrow | drag its end off the shape, or move the arrow by itself |
@@ -68,6 +69,61 @@ Editing: Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+C/X/V, Ctrl+D duplicate,
 Ctrl+A select all, Delete, arrow keys nudge (Shift = 10 px),
 Ctrl+] / Ctrl+[ bring to front / send to back.
 
+
+## Diagrams as code (`*.tanuki`)
+
+Write a diagram as text and the app draws it: every `*.tanuki` file in the
+map folder becomes one frame at the top level, laid out automatically. Save
+the file and the open window updates within half a second. Move or resize
+the frame as you like (it stays put), and anything you draw by hand inside
+it survives rebuilds. Everything else in the frame comes from the file, so
+edit the file, not the shapes.
+
+```
+# Qargo platform                         title of the frame
+> Markdown note shown inside the frame.  notes: "> " lines
+
+concept order: Order lifecycle [orange]  a concept (highlight set)
+  > From EDI import to invoice.           its explanation
+  edi -> api: EDI message                 arrows inside it are numbered steps
+  api -> orders: create order
+
+edi: EDI inbox [cyan]                    a box: id: Label [attrs]
+api: API gateway [#order]                #concept tags it
+  > Auth + routing.                       a note inside: zoom in to read it
+  > ```py                                 fenced code becomes a code card
+  > def handler(): ...
+  > ```
+services: Services [down]                indented boxes go inside (zoomable)
+  orders: Orders
+  invoices: Invoices
+  orders --> invoices: nightly           dashed arrow
+pg: Postgres\n(primary) [ellipse, green]  \n breaks a label
+api ..> pg: reads                         dotted arrow
+api <-> orders                            heads at both ends
+api -- pg                                 plain line; `..` dotted line
+```
+
+- **Arrows** connect any two boxes by id, at any depth; they live in the
+  deepest box holding both ends. Chains work: `a -> b -> c`.
+- **Box attrs:** `ellipse`, `diamond`, color (`red pink grape violet indigo
+  blue cyan teal green lime yellow orange gray white none`), `dashed`,
+  `dotted`, `hatch`, `crosshatch`, `clean`, `sketchy`, `bold`, `thin`,
+  `big`, layout of what's inside (`right`, `down`, `grid`), `#concept`.
+- **Arrow attrs:** color, `dashed`, `dotted`, `bold`, `thin`, `#concept`.
+- **Layout:** boxes linked by arrows flow left to right (or `down`); boxes
+  without arrows form a grid. `layout down` on its own line works too.
+- **Concepts:** the panel top right lists them; click one (or press C to
+  cycle) and everything else dims while its boxes, arrows and the shapes
+  containing them glow. Steps are numbered in order.
+- `// comment` lines are ignored. Errors show as a toast with the line.
+
+`tanuki-notes --build <map>` rebuilds without a window (exit 1 on errors).
+`TANUKI_SNAPSHOT_AT="API gateway" TANUKI_SNAPSHOT_CONCEPT=order
+tanuki-notes --snapshot out.png <map>` renders a PNG zoomed onto a shape,
+with a concept lit.
+
+The style panel also has dashed and dotted strokes for hand-drawn shapes.
 
 ## The map folder (git-friendly)
 

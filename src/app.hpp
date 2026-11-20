@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assets.hpp"
+#include "diagram.hpp"
 #include "geom.hpp"
 #include "node.hpp"
 #include "ui.hpp"
@@ -10,6 +11,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -65,6 +67,14 @@ class App {
     void redo();
     void insert_file(const std::string& path, Vec2 center);
 
+    // Diagrams written as *.tanuki files (see diagram.hpp).
+    const std::string& diagram_error() const { return diagram_error_; }
+    void focus_concept(const std::string& id) { focus_ = id; }
+    void show(const std::string& title) { // fly to a shape by its title
+        follow_link(title);
+        selection_.clear();
+    }
+
   private:
     friend int run_selftest(NVGcontext* vg, SDL_Window* window);
 
@@ -100,6 +110,13 @@ class App {
     Node* bind_target_at(Vec2 p, const Node* exclude);
     void bind_endpoints(Node& n);
     void toggle_theme();
+
+    // Rebuilds frames from *.tanuki files that changed since the last look.
+    void sync_diagrams(bool startup);
+    void place_diagram(std::unique_ptr<Node> frame);
+    std::vector<const diagram::Concept*> all_concepts() const;
+    void cycle_concept();
+    void draw_concepts();
     std::vector<Vec2> bend_handles(const Node& n, Xform t) const;
     void update_bindings();
 
@@ -248,6 +265,12 @@ class App {
     double toast_until_ = 0;
 
     std::vector<Hit> hits_, next_hits_;
+
+    std::map<std::string, std::filesystem::file_time_type> diagram_mtimes_;
+    std::map<std::string, std::vector<diagram::Concept>> concepts_; // by file
+    std::string diagram_error_;
+    std::string focus_; // highlighted concept id, or ""
+    double last_scan_ = -1;
 
     std::mutex pending_mutex_;
     std::vector<std::string> pending_files_;

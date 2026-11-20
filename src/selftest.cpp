@@ -6,6 +6,7 @@
 
 #include "app.hpp"
 #include "code.hpp"
+#include "diagram.hpp"
 #include "note.hpp"
 #include "render.hpp"
 #include "ui.hpp"
@@ -826,6 +827,66 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         CHECK(app.root().children[3]->start_at.x < 0);
     }
     fs::remove_all(dir2);
+
+    {   // Diagrams from text: nesting, arrows in the deepest shared box,
+        // concept steps, stable ids, and hand-drawn shapes surviving a rebuild.
+        const char* src = "# Shop\n"
+                          "concept pay: Paying [orange]\n"
+                          "  web -> orders: order\n"
+                          "web: Web [blue, #pay]\n"
+                          "  > The *UI*.\n"
+                          "svc: Services\n"
+                          "  orders: Orders [ellipse]\n"
+                          "  billing: Billing\n"
+                          "  orders --> billing [dotted]\n";
+        auto r = diagram::build(vg, src, "shop.tanuki");
+        CHECK(r.error.empty());
+        CHECK(r.frame && r.frame->text == "Shop" && r.concepts.size() == 1);
+        if (r.frame) {
+            Node& f = *r.frame;
+            Node* svc = find_by_id(f, diagram::hash_id("shop.tanuki/svc"));
+            Node* web = find_by_id(f, diagram::hash_id("shop.tanuki/web"));
+            CHECK(svc && svc->parent == &f && svc->children.size() == 3); // 2 boxes + arrow
+            CHECK(web && web->children.size() == 1 && web->children[0]->kind == Kind::Text);
+            Node* step = nullptr;
+            for (auto& c : f.children) {
+                if (c->kind == Kind::Arrow) {
+                    step = c.get();
+                }
+            }
+            CHECK(step && step->text == "1. order" && step->tags == std::vector<std::string>{"pay"});
+            CHECK(svc && svc->children.back()->style.dash == 2);
+            for (auto& c : f.children) { // inside the frame, units are 0..1
+                CHECK(c->x >= 0 && c->x + c->w <= 1.0001);
+            }
+            auto again = diagram::build(vg, src, "shop.tanuki");
+            CHECK(node_to_json(*again.frame, true) == node_to_json(f, true));
+        }
+        CHECK(diagram::build(vg, "a -> b\n", "x.tanuki").error == "line 1: unknown box 'a'");
+        CHECK(diagram::build(vg, "a: A [#nope]\n", "x.tanuki").error.starts_with("line 1: unknown concept"));
+
+        fs::path d3 = fs::temp_directory_path() / ("tanuki-diagram-" + std::to_string(getpid()));
+        fs::remove_all(d3);
+        fs::create_directories(d3);
+        std::ofstream(d3 / "shop.tanuki") << src;
+        {
+            App app(vg, window, d3);
+            CHECK(app.root().children.size() == 1);
+            Node& f = *app.root().children[0];
+            add_child(f, make_node(Kind::Rect)); // drawn by hand
+            f.x = 0.25;                           // and the frame moved
+            std::ofstream(d3 / "shop.tanuki") << src << "extra: Extra\n";
+            fs::last_write_time(d3 / "shop.tanuki", fs::file_time_type::clock::now() + std::chrono::seconds(5));
+            t_now += 1;
+            tick(app);
+            Node& g = *app.root().children[0];
+            CHECK(near(g.x, 0.25));
+            CHECK(std::count_if(g.children.begin(), g.children.end(),
+                                [](auto& c) { return c->src.empty(); }) == 1);
+            CHECK(find_by_id(g, diagram::hash_id("shop.tanuki/extra")) != nullptr);
+        }
+        fs::remove_all(d3);
+    }
 
     {   // Dark mode flips lightness, keeps hue; light mode leaves colors be.
         NVGcolor w = nvgRGB(255, 255, 255), k = nvgRGB(30, 30, 30);

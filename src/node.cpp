@@ -149,7 +149,19 @@ json node_to_json(const Node& n, bool recursive) {
     if (n.style.font_size > 0) {
         j["font_size"] = n.style.font_size;
     }
+    if (n.style.dash) {
+        j["dash"] = n.style.dash == 1 ? "dashed" : "dotted";
+    }
+    if (n.style.start_arrow) {
+        j["start_arrow"] = true;
+    }
     j["seed"] = n.seed;
+    if (!n.tags.empty()) {
+        j["tags"] = n.tags;
+    }
+    if (!n.src.empty()) {
+        j["src"] = n.src;
+    }
     if (!n.points.empty()) {
         json pts = json::array();
         for (Vec2 p : n.points) {
@@ -210,6 +222,11 @@ std::unique_ptr<Node> node_from_json(const json& j) {
     n->style.font_size = j.value("font_size", 0.0);
     n->lang = j.value("lang", "");
     n->seed = j.value("seed", 1u);
+    std::string dash = j.value("dash", "");
+    n->style.dash = dash == "dashed" ? 1 : dash == "dotted" ? 2 : 0;
+    n->style.start_arrow = j.value("start_arrow", false);
+    n->tags = j.value("tags", std::vector<std::string>{});
+    n->src = j.value("src", "");
     if (j.contains("points")) {
         for (const auto& p : j["points"]) {
             n->points.push_back({p[0].get<double>(), p[1].get<double>()});

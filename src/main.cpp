@@ -60,7 +60,7 @@ int snapshot(NVGcontext* vg, SDL_Window* window, App& app, const char* out) {
         glViewport(0, 0, w, h);
         glClearColor(ui::dark ? 0.07f : 1, ui::dark ? 0.07f : 1, ui::dark ? 0.07f : 1, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-        app.update(i / 60.0, w, h);
+        app.update(100 + i / 60.0, w, h); // after any flying done before
         app.render(1);
     }
     std::vector<unsigned char> px(size_t(w) * h * 4);
@@ -84,12 +84,13 @@ int main(int argc, char** argv) {
     bool selftest = !args.empty() && args[0] == "--selftest";
     bool snap = args.size() >= 2 && args[0] == "--snapshot";
     bool demo = args.size() >= 2 && args[0] == "--make-demo";
-    bool headless = selftest || snap || demo;
+    bool build = args.size() >= 2 && args[0] == "--build";
+    bool headless = selftest || snap || demo || build;
 
     std::filesystem::path map_dir;
     if (snap && args.size() >= 3) {
         map_dir = args[2];
-    } else if (demo) {
+    } else if (demo || build) {
         map_dir = args[1];
     } else if (!headless && !args.empty()) {
         map_dir = args[0];
@@ -147,6 +148,10 @@ int main(int argc, char** argv) {
             app.insert_file(args[i], {1150.0, 200.0 + 260.0 * double(i - 2)});
         }
         app.flush();
+    } else if (build) { // rebuild the map from its *.tanuki files and exit
+        App app(vg, window, map_dir);
+        app.flush();
+        code = app.diagram_error().empty() ? 0 : 1;
     } else if (snap) {
         App app(vg, window, map_dir);
         if (args.size() >= 6) { // --snapshot out dir x y zoom
@@ -165,6 +170,16 @@ int main(int argc, char** argv) {
             app.update(0, 1280, 800);
             app.key_down(SDLK_F, {false, true, false});
             app.text_input(q);
+        }
+        if (const char* id = std::getenv("TANUKI_SNAPSHOT_CONCEPT")) {
+            app.focus_concept(id);
+        }
+        if (const char* title = std::getenv("TANUKI_SNAPSHOT_AT")) { // fly to a shape
+            app.update(0, 1280, 800);
+            app.show(title);
+            for (int i = 0; i < 200; ++i) {
+                app.update(i / 60.0, 1280, 800);
+            }
         }
         code = snapshot(vg, window, app, args[1].c_str());
     } else {

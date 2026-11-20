@@ -34,6 +34,8 @@ struct Style {
     double stroke_width = 0; // in PARENT local units
     int roughness = 1;       // 0 architect, 1 artist, 2 cartoonist
     double font_size = 0;    // in PARENT local units
+    int dash = 0;            // 0 solid, 1 dashed, 2 dotted
+    bool start_arrow = false; // Arrow: a head at the start too
 };
 
 struct Node {
@@ -52,6 +54,8 @@ struct Node {
     // 0..1 of the shape's box; x < 0: not pinned, aims at the center.
     Vec2 start_at{-1, -1}, end_at{-1, -1};
     uint32_t seed = 1;        // keeps the hand-drawn wobble stable
+    std::vector<std::string> tags; // concepts this node belongs to
+    std::string src;          // made from this .tanuki file (rebuilt from it)
 
     // Runtime only: 0 = label centered, 1 = label is the top-left title.
     // Animated by the renderer when the shape gains or loses contents.

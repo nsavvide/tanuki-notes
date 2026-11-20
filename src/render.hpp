@@ -20,6 +20,11 @@ struct RenderCtx {
     const Node* editing = nullptr; // note being typed in: its caret line shows Markdown
     size_t caret = 0;
     bool animating = false;      // out: a label is still moving
+    // Concept focus: everything outside `lit` is dimmed and `glow` gets a
+    // halo in `glow_color`.
+    bool focus = false;
+    std::set<const Node*> lit{}, glow{};
+    uint32_t glow_color = 0;
 };
 
 // Parent placement + child's fractions -> child placement.
