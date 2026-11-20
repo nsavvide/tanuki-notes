@@ -6,7 +6,7 @@
 
 #include "app.hpp"
 #include "code.hpp"
-#include "diagram.hpp"
+#include "pages.hpp"
 #include "note.hpp"
 #include "render.hpp"
 #include "ui.hpp"
@@ -828,63 +828,106 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
     }
     fs::remove_all(dir2);
 
-    {   // Diagrams from text: nesting, arrows in the deepest shared box,
-        // concept steps, stable ids, and hand-drawn shapes surviving a rebuild.
-        const char* src = "# Shop\n"
-                          "concept pay: Paying [orange]\n"
-                          "  web -> orders: order\n"
-                          "web: Web [blue, #pay]\n"
-                          "  > The *UI*.\n"
-                          "svc: Services\n"
-                          "  orders: Orders [ellipse]\n"
-                          "  billing: Billing\n"
-                          "  orders --> billing [dotted]\n";
-        auto r = diagram::build(vg, src, "shop.tanuki");
-        CHECK(r.error.empty());
-        CHECK(r.frame && r.frame->text == "Shop" && r.concepts.size() == 1);
-        if (r.frame) {
-            Node& f = *r.frame;
-            Node* svc = find_by_id(f, diagram::hash_id("shop.tanuki/svc"));
-            Node* web = find_by_id(f, diagram::hash_id("shop.tanuki/web"));
-            CHECK(svc && svc->parent == &f && svc->children.size() == 3); // 2 boxes + arrow
-            CHECK(web && web->children.size() == 1 && web->children[0]->kind == Kind::Text);
-            Node* step = nullptr;
-            for (auto& c : f.children) {
-                if (c->kind == Kind::Arrow) {
-                    step = c.get();
-                }
-            }
-            CHECK(step && step->text == "1. order" && step->tags == std::vector<std::string>{"pay"});
-            CHECK(svc && svc->children.back()->style.dash == 2);
-            for (auto& c : f.children) { // inside the frame, units are 0..1
-                CHECK(c->x >= 0 && c->x + c->w <= 1.0001);
-            }
-            auto again = diagram::build(vg, src, "shop.tanuki");
-            CHECK(node_to_json(*again.frame, true) == node_to_json(f, true));
-        }
-        CHECK(diagram::build(vg, "a -> b\n", "x.tanuki").error == "line 1: unknown box 'a'");
-        CHECK(diagram::build(vg, "a: A [#nope]\n", "x.tanuki").error.starts_with("line 1: unknown concept"));
+    {   // Markdown pages: parse and write back unchanged; notes that look
+        // like structure survive escaping.
+        const std::string page =
+            "# Error Handling\n\n"
+            "issue: https://www.notion.so/team/Order-import-retries-0123456789abcdef0123456789abcdef\n\n"
+            "- Do the work\n- Fail (`UserInputValidationError`)\n\n"
+            "---\n\n"
+            "\\## not a box\n\\---\nstill the same note\n\n"
+            "```py\nx = 1\n# a comment, not a heading\n```\n\n"
+            "## Execution Service\n\n"
+            "-> [[Orchestration Service]]: calls\n\n"
+            "## Orchestration Service\n\n"
+            "### steps\n\n"
+            "- runs `handle_action`\n";
+        pages::Box b;
+        b.file = "x/_index.md";
+        pages::parse_page(page, b);
+        CHECK(b.title == "Error Handling" && b.kids.size() == 2 && b.notes.size() == 3);
+        CHECK(b.notes.size() == 3 && b.notes[1].text == "## not a box\n---\nstill the same note");
+        CHECK(b.notes.size() == 3 && b.notes[2].code && b.notes[2].lang == "py");
+        CHECK(b.kids.size() == 2 && b.kids[0].links.size() == 1 &&
+              b.kids[0].links[0].target == "Orchestration Service" &&
+              b.kids[0].links[0].label == "calls");
+        CHECK(b.kids.size() == 2 && b.kids[1].kids.size() == 1 && b.kids[1].kids[0].title == "steps");
+        CHECK(pages::issue_title(b.issues.at(0)) == "Order import retries");
+        auto files = pages::render(b);
+        CHECK(files["x/_index.md"] == page);
+    }
 
-        fs::path d3 = fs::temp_directory_path() / ("tanuki-diagram-" + std::to_string(getpid()));
+    {   // Map folder <-> pages, both ways.
+        fs::path d3 = fs::temp_directory_path() / ("tanuki-pages-" + std::to_string(getpid()));
         fs::remove_all(d3);
-        fs::create_directories(d3);
-        std::ofstream(d3 / "shop.tanuki") << src;
+        fs::create_directories(d3 / "qargo");
+        auto put = [&](const char* rel, const std::string& text) {
+            std::ofstream(d3 / rel) << text;
+            fs::last_write_time(d3 / rel, fs::file_time_type::clock::now() + std::chrono::seconds(5 + int(t_now)));
+        };
+        auto get = [&](const char* rel) {
+            std::ifstream in(d3 / rel);
+            return std::string(std::istreambuf_iterator<char>(in), {});
+        };
+        put("_index.md", "A note at the top.\n");
+        put("qargo/_index.md", "# Qargo\n\n## Hasura\n\n-> [[PgDog]]: reads\n\n## PgDog\n");
+        put("README.md", "# Readme\n"); // a page too: the folder is a map
+        fs::create_directories(d3 / "flows");
+        put("flows/reads.md", "# Reads\n\nHow a read goes.\n\n[[Hasura]] -> [[Qargo > PgDog]]: query\n");
         {
             App app(vg, window, d3);
-            CHECK(app.root().children.size() == 1);
-            Node& f = *app.root().children[0];
-            add_child(f, make_node(Kind::Rect)); // drawn by hand
-            f.x = 0.25;                           // and the frame moved
-            std::ofstream(d3 / "shop.tanuki") << src << "extra: Extra\n";
-            fs::last_write_time(d3 / "shop.tanuki", fs::file_time_type::clock::now() + std::chrono::seconds(5));
-            t_now += 1;
             tick(app);
-            Node& g = *app.root().children[0];
-            CHECK(near(g.x, 0.25));
-            CHECK(std::count_if(g.children.begin(), g.children.end(),
-                                [](auto& c) { return c->src.empty(); }) == 1);
-            CHECK(find_by_id(g, diagram::hash_id("shop.tanuki/extra")) != nullptr);
+            Node* qargo = nullptr;
+            for (auto& c : app.root().children) {
+                if (c->text == "Qargo") {
+                    qargo = c.get();
+                }
+            }
+            CHECK(qargo && qargo->w > 0 && qargo->children.size() == 4); // 2 boxes, arrow, flow step
+            CHECK(app.pages_error().empty());
+            if (qargo && qargo->children.size() == 4) {
+                Node& step = *qargo->children[3];
+                CHECK(step.text == "1. query" && step.tags == std::vector<std::string>{"reads"});
+                std::erase_if(qargo->children, [&](auto& c) { return c.get() == &step; });
+                Node& hasura = *qargo->children[0];
+                Node& arrow = *qargo->children[2];
+                CHECK(arrow.kind == Kind::Arrow && arrow.start_bind == hasura.id &&
+                      arrow.end_bind == qargo->children[1]->id && arrow.text == "reads");
+                double hx = hasura.x;
+                hasura.x += 0.01; // dragged by hand: stays there
+                hx = hasura.x;
+
+                // Edited in the app: written back.
+                add_child(hasura, make_node(Kind::Text)).text = "Tenant-facing GraphQL";
+                app.flush();
+                CHECK(get("qargo/_index.md").contains("## Hasura\n\nTenant-facing GraphQL\n"));
+
+                // Edited on disk: a new box appears, the moved one stays put.
+                put("qargo/_index.md", get("qargo/_index.md") + "\n## Pub/Sub\n");
+                t_now += 2;
+                tick(app);
+                CHECK(qargo->children.size() == 5); // the flow step came back too
+                CHECK(near(hasura.x, hx));
+                CHECK(std::any_of(qargo->children.begin(), qargo->children.end(),
+                                  [](auto& c) { return c->text == "Pub/Sub" && c->w > 0; }));
+            }
+            app.flush();
         }
+        CHECK(fs::exists(d3 / "qargo" / "board.json"));
+        CHECK(get("README.md") == "# Readme\n");
+        fs::remove_all(d3);
+
+        // A folder that isn't a map: drawing in it never deletes its README.
+        fs::create_directories(d3);
+        std::ofstream(d3 / "README.md") << "hello\n";
+        {
+            App app(vg, window, d3);
+            tick(app);
+            app.set_tool(Tool::Rect);
+            drag(app, {300, 300}, {500, 400});
+            app.flush();
+        }
+        CHECK(fs::exists(d3 / "README.md"));
         fs::remove_all(d3);
     }
 

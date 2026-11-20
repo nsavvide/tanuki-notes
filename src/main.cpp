@@ -148,10 +148,10 @@ int main(int argc, char** argv) {
             app.insert_file(args[i], {1150.0, 200.0 + 260.0 * double(i - 2)});
         }
         app.flush();
-    } else if (build) { // rebuild the map from its *.tanuki files and exit
+    } else if (build) { // read the pages, place what's new, save, exit
         App app(vg, window, map_dir);
         app.flush();
-        code = app.diagram_error().empty() ? 0 : 1;
+        code = app.pages_error().empty() ? 0 : 1;
     } else if (snap) {
         App app(vg, window, map_dir);
         if (args.size() >= 6) { // --snapshot out dir x y zoom
@@ -171,8 +171,8 @@ int main(int argc, char** argv) {
             app.key_down(SDLK_F, {false, true, false});
             app.text_input(q);
         }
-        if (const char* id = std::getenv("TANUKI_SNAPSHOT_CONCEPT")) {
-            app.focus_concept(id);
+        if (const char* key = std::getenv("TANUKI_SNAPSHOT_FOCUS")) { // flow:<id> or issue:<url>
+            app.focus(key);
         }
         if (const char* title = std::getenv("TANUKI_SNAPSHOT_AT")) { // fly to a shape
             app.update(0, 1280, 800);

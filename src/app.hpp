@@ -1,7 +1,7 @@
 #pragma once
 
 #include "assets.hpp"
-#include "diagram.hpp"
+#include "pages.hpp"
 #include "geom.hpp"
 #include "node.hpp"
 #include "ui.hpp"
@@ -20,6 +20,7 @@
 #include <vector>
 
 struct NVGcontext;
+struct RenderCtx;
 
 enum class Tool {
     Hand, Select, Rect, Diamond, Ellipse, Arrow, Line, Draw, Text, Image, Eraser,
@@ -67,9 +68,10 @@ class App {
     void redo();
     void insert_file(const std::string& path, Vec2 center);
 
-    // Diagrams written as *.tanuki files (see diagram.hpp).
-    const std::string& diagram_error() const { return diagram_error_; }
-    void focus_concept(const std::string& id) { focus_ = id; }
+    // The Markdown pages (pages.hpp); problems from the last read.
+    const std::string& pages_error() const { return pages_error_; }
+    // Light up a flow ("flow:<id>") or an issue ("issue:<url>").
+    void focus(const std::string& key) { focus_ = key; }
     void show(const std::string& title) { // fly to a shape by its title
         follow_link(title);
         selection_.clear();
@@ -111,12 +113,19 @@ class App {
     void bind_endpoints(Node& n);
     void toggle_theme();
 
-    // Rebuilds frames from *.tanuki files that changed since the last look.
-    void sync_diagrams(bool startup);
-    void place_diagram(std::unique_ptr<Node> frame);
-    std::vector<const diagram::Concept*> all_concepts() const;
-    void cycle_concept();
-    void draw_concepts();
+    // Markdown pages <-> tree (app_pages.cpp).
+    void load_pages(bool startup); // pages win: update, add, remove nodes
+    void save_pages();             // tree -> pages (only changed files)
+    void watch_pages();            // reload when a page changed on disk
+    struct FocusItem {
+        std::string key, name, note;
+        uint32_t color;
+    };
+    std::vector<FocusItem> focus_items() const; // flows, then issues
+    void cycle_focus();
+    void highlight(RenderCtx& ctx) const;
+    void draw_focus_panel();
+    void draw_issue_badges(Node* top, Xform t);
     std::vector<Vec2> bend_handles(const Node& n, Xform t) const;
     void update_bindings();
 
@@ -266,10 +275,11 @@ class App {
 
     std::vector<Hit> hits_, next_hits_;
 
-    std::map<std::string, std::filesystem::file_time_type> diagram_mtimes_;
-    std::map<std::string, std::vector<diagram::Concept>> concepts_; // by file
-    std::string diagram_error_;
-    std::string focus_; // highlighted concept id, or ""
+    std::vector<pages::Flow> flows_;
+    std::map<std::string, std::filesystem::file_time_type> page_stamps_; // at last read/write
+    std::set<std::string> known_pages_; // read or written by us: the only ones we delete
+    std::string pages_error_;
+    std::string focus_; // highlighted flow or issue, or ""
     double last_scan_ = -1;
 
     std::mutex pending_mutex_;

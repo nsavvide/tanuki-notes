@@ -159,8 +159,14 @@ json node_to_json(const Node& n, bool recursive) {
     if (!n.tags.empty()) {
         j["tags"] = n.tags;
     }
-    if (!n.src.empty()) {
-        j["src"] = n.src;
+    if (!n.mdfile.empty()) {
+        j["mdfile"] = n.mdfile;
+    }
+    if (!n.issues.empty()) {
+        j["issues"] = n.issues;
+    }
+    if (n.md) {
+        j["md"] = true;
     }
     if (!n.points.empty()) {
         json pts = json::array();
@@ -226,7 +232,9 @@ std::unique_ptr<Node> node_from_json(const json& j) {
     n->style.dash = dash == "dashed" ? 1 : dash == "dotted" ? 2 : 0;
     n->style.start_arrow = j.value("start_arrow", false);
     n->tags = j.value("tags", std::vector<std::string>{});
-    n->src = j.value("src", "");
+    n->mdfile = j.value("mdfile", "");
+    n->issues = j.value("issues", std::vector<std::string>{});
+    n->md = j.value("md", false);
     if (j.contains("points")) {
         for (const auto& p : j["points"]) {
             n->points.push_back({p[0].get<double>(), p[1].get<double>()});

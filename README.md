@@ -35,7 +35,7 @@ folder or `/` into a map.
 | Jump to a parent | click it in the breadcrumb (top left) |
 | Search | Ctrl+F or `/`: labels, notes, file names and text inside PDFs; ↑↓ and Enter fly there |
 | Attach an arrow | start or end it on a shape; it follows when the shape moves or resizes |
-| Highlight a concept | C cycles through them, or click one in the Concepts panel |
+| Light up a flow or issue | C cycles through them, or click one in the panel (top right); click an issue tag on a box to open it |
 | Dark mode | moon/sun button top right, or Shift+Alt+D; follows the system theme until you pick one |
 | Pin an arrow to a spot | drop its end on or near the outline: it stays on that exact spot (snaps to edge midpoints); drop it deep inside to aim at the center |
 | Detach an arrow | drag its end off the shape, or move the arrow by itself |
@@ -70,81 +70,92 @@ Ctrl+A select all, Delete, arrow keys nudge (Shift = 10 px),
 Ctrl+] / Ctrl+[ bring to front / send to back.
 
 
-## Diagrams as code (`*.tanuki`)
+## Notes as Markdown pages
 
-Write a diagram as text and the app draws it: every `*.tanuki` file in the
-map folder becomes one frame at the top level, laid out automatically. Save
-the file and the open window updates within half a second. Move or resize
-the frame as you like (it stays put), and anything you draw by hand inside
-it survives rebuilds. Everything else in the frame comes from the file, so
-edit the file, not the shapes.
+Every box with a title is also a Markdown page, so you (or Claude) can write
+the map as text and the drawing follows. Edits go both ways: type in the app
+and the page updates; save a page and the open window updates within a
+second. Boxes you have placed never move because of a page edit; new ones
+are laid out automatically (along their arrows, or in a grid), and the box
+grows and pushes what's below it down to make room.
 
 ```
-# Qargo platform                         title of the frame
-> Markdown note shown inside the frame.  notes: "> " lines
-
-concept order: Order lifecycle [orange]  a concept (highlight set)
-  > From EDI import to invoice.           its explanation
-  edi -> api: EDI message                 arrows inside it are numbered steps
-  api -> orders: create order
-
-edi: EDI inbox [cyan]                    a box: id: Label [attrs]
-api: API gateway [#order]                #concept tags it
-  > Auth + routing.                       a note inside: zoom in to read it
-  > ```py                                 fenced code becomes a code card
-  > def handler(): ...
-  > ```
-services: Services [down]                indented boxes go inside (zoomable)
-  orders: Orders
-  invoices: Invoices
-  orders --> invoices: nightly           dashed arrow
-pg: Postgres\n(primary) [ellipse, green]  \n breaks a label
-api ..> pg: reads                         dotted arrow
-api <-> orders                            heads at both ends
-api -- pg                                 plain line; `..` dotted line
+notes/
+  _index.md                  the top level: notes, `##` boxes, arrows
+  qargo/_index.md            a box with a folder of its own
+  qargo/architecture/_index.md
+  qargo/hasura.md            a box with a page but no folder
+  flows/order-to-invoice.md  a flow (see below)
 ```
 
-- **Arrows** connect any two boxes by id, at any depth; they live in the
-  deepest box holding both ends. Chains work: `a -> b -> c`.
-- **Box attrs:** `ellipse`, `diamond`, color (`red pink grape violet indigo
-  blue cyan teal green lime yellow orange gray white none`), `dashed`,
-  `dotted`, `hatch`, `crosshatch`, `clean`, `sketchy`, `bold`, `thin`,
-  `big`, layout of what's inside (`right`, `down`, `grid`), `#concept`.
-- **Arrow attrs:** color, `dashed`, `dotted`, `bold`, `thin`, `#concept`.
-- **Layout:** boxes linked by arrows flow left to right (or `down`); boxes
-  without arrows form a grid. `layout down` on its own line works too.
-- **Concepts:** the panel top right lists them; click one (or press C to
-  cycle) and everything else dims while its boxes, arrows and the shapes
-  containing them glow. Steps are numbered in order.
-- `// comment` lines are ignored. Errors show as a toast with the line.
+A page:
 
-`tanuki-notes --build <map>` rebuilds without a window (exit 1 on errors).
-`TANUKI_SNAPSHOT_AT="API gateway" TANUKI_SNAPSHOT_CONCEPT=order
-tanuki-notes --snapshot out.png <map>` renders a PNG zoomed onto a shape,
-with a concept lit.
+```markdown
+# Error Handling
+issue: https://www.notion.so/team/Order-import-retries-0123…  Order import retries
+
+- Do the work
+- Fail if something went wrong (`UserInputValidationError`)
+
+---
+
+A second note. ```py fences become code cards.
+
+-> [[Orchestration Service]]: calls
+
+## Order Import Execution Service
+### steps
+```
+
+- **`#`** is the box's title; **`##`, `###`…** are boxes inside it. A box
+  with boxes of its own can also be a folder with an `_index.md`: same
+  meaning, so moving a section into its own file is free.
+- **Text** is the notes you read when you zoom in; `---` starts the next
+  note. A note line that would read as structure (`## …`, `---`, an arrow)
+  is written with a leading `\`.
+- **Arrows** go from the box they're written in: `-> [[Box]]: label`, `-->`
+  dashed, `..>` dotted, `<->` both ways, `--` / `..` lines. `[[Shard 1 >
+  Primary]]` picks one of several boxes with the same title.
+- **Issues:** `issue: <url> [title]` puts a tag on the box (click it to open
+  the page, e.g. in Notion). The panel top right lists every issue; pick one
+  and every box linked to it lights up.
+- **Flows** are pages in `flows/`: a title, a description, and steps
+  `[[A]] -> [[B]]: label`. They show as numbered arrows, only while picked
+  in the panel (or with C).
+
+Anything without a title (freehand, images, unlabelled shapes, arrows to a
+note) lives only in `board.json`, next to its page.
+
+`tanuki-notes --build <map>` reads the pages, places what's new, saves and
+exits (exit 1 when an arrow or flow names a box that doesn't exist).
+`TANUKI_SNAPSHOT_AT="Architecture" TANUKI_SNAPSHOT_FOCUS=flow:order-to-invoice
+tanuki-notes --snapshot out.png <map>` renders a PNG zoomed onto a box, with
+a flow (or `issue:<url>`) lit.
 
 The style panel also has dashed and dotted strokes for hand-drawn shapes.
 
 ## The map folder (git-friendly)
 
-Everything autosaves to plain files:
+Everything autosaves to plain files: the Markdown pages above, plus
 
 ```
 notes/
-  board.json                 shapes at the top level
-  rust-3f9a1c/board.json     shapes inside the "Rust" shape
-  rust-3f9a1c/ownership-.../ ...nested as deep as you zoom
+  board.json                 where things are at the top level, and drawings
+  qargo/board.json           the same inside "Qargo" (next to its _index.md)
   assets/                    copied images and PDFs
   .view.json                 where you were looking (gitignored)
 ```
 
 Ids are stable and files are only rewritten when they change, so `git diff`
-shows exactly what you edited. Ctrl+S runs `git init` (first time, if needed),
-`git add -A` and `git commit` in the map folder.
+shows exactly what you edited. The app only ever deletes pages it wrote or
+read itself. Ctrl+S runs `git init` (first time, if needed), `git add -A` and
+`git commit` in the map folder.
 
 A map folder inside an existing repo (say `myproject/docs/map`) uses that
 repo instead of creating its own, and Ctrl+S commits only the map folder:
 anything else you have staged is left alone.
+
+An older map (boards only) turns into pages the first time it's opened.
 
 ## How infinite zoom works
 

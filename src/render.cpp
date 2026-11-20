@@ -460,6 +460,9 @@ static void draw_label(RenderCtx& ctx, const Node& n, Xform t, float alpha) {
         return;
     }
     TextLayout L = layout_text(ctx.vg, n, t);
+    if (n.is_linear() && L.px > 48) {
+        return; // a label from a level far above: too big to read, only clutter
+    }
     // Arrow labels cut the line behind them.
     if (n.is_linear() && L.px >= 2) {
         double lh = L.px * text::line_height, padx = L.px * 0.3;
@@ -848,8 +851,9 @@ void draw_subtree(RenderCtx& ctx, const Node& n, Xform t) {
     float alpha = ctx.faded.contains(&n) ? 0.3f : 1.0f;
     if (ctx.focus && !ctx.lit.contains(&n)) {
         alpha = 0.12f;
-    } else if (!ctx.focus && n.is_linear() && !n.tags.empty()) {
-        alpha = 0.25f; // concept arrows stay quiet until their concept is picked
+    }
+    if (n.is_linear() && !n.tags.empty() && !ctx.lit.contains(&n)) {
+        return; // flow arrows only show while their flow is picked
     }
 
     if (n.kind != Kind::Root && r.w < 3 && r.h < 3) {

@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
+#include <algorithm>
 #include <ctime>
 #include <fstream>
 #include <set>
@@ -35,29 +36,10 @@ static void write_if_changed(const fs::path& p, const std::string& content) {
     fs::rename(tmp, p);
 }
 
-static std::string slug(const std::string& text) {
-    std::string out;
-    for (char c : text.substr(0, text.find('\n'))) {
-        if (std::isalnum((unsigned char)c)) {
-            out += char(std::tolower((unsigned char)c));
-        } else if (!out.empty() && out.back() != '-') {
-            out += '-';
-        }
-        if (out.size() >= 32) {
-            break;
-        }
-    }
-    while (!out.empty() && out.back() == '-') {
-        out.pop_back();
-    }
-    return out;
-}
-
-static std::string folder_name(const Node& n) {
-    std::string s = slug(n.text);
-    return (s.empty() ? std::string(kind_name(n.kind)) : s) + "-" +
-           n.id.substr(0, 6);
-}
+// A box with its own page folder ("qargo/_index.md", see pages.hpp) keeps its
+// board.json next to that page; everything else is saved inside its parent's
+// board.json.
+static bool has_folder(const Node& n) { return n.mdfile.ends_with("/_index.md"); }
 
 static void collect(const Node& node, const fs::path& folder,
                     std::vector<std::pair<fs::path, std::string>>& files,
@@ -65,12 +47,15 @@ static void collect(const Node& node, const fs::path& folder,
     folders.insert(folder);
     json nodes = json::array();
     for (const auto& c : node.children) {
-        json j = node_to_json(*c, false);
-        if (!c->children.empty()) {
-            j["folder"] = folder_name(*c);
-            collect(*c, folder / folder_name(*c), files, folders);
+        if (has_folder(*c)) {
+            json j = node_to_json(*c, false);
+            std::string name = fs::path(c->mdfile).parent_path().filename().string();
+            j["folder"] = name;
+            collect(*c, folder / name, files, folders);
+            nodes.push_back(j);
+        } else {
+            nodes.push_back(node_to_json(*c, true));
         }
-        nodes.push_back(j);
     }
     json board = {{"tanuki", 1}, {"nodes", nodes}};
     files.emplace_back(folder / "board.json", board.dump(2) + "\n");
@@ -111,29 +96,49 @@ void save(const Node& root, const fs::path& dir) {
     }
     ensure_gitignore(dir);
 
-    // Remove board folders of nodes that no longer exist. Only touches
-    // folders that contain a board.json, never assets or .git.
+    // Boards of folders we no longer use. Only board.json files are removed
+    // here; prune() then clears folders left empty.
     std::vector<fs::path> stale;
     for (auto it = fs::recursive_directory_iterator(dir);
          it != fs::recursive_directory_iterator(); ++it) {
         const fs::path& p = it->path();
-        if (it->is_directory() && p.filename().string().starts_with(".")) {
+        if (it->is_directory() && (p.filename().string().starts_with(".") ||
+                                   (p.filename() == "assets" && p.parent_path() == dir))) {
             it.disable_recursion_pending();
             continue;
         }
-        if (it->is_directory() && p.filename() == "assets" &&
-            p.parent_path() == dir) {
-            it.disable_recursion_pending();
-            continue;
-        }
-        if (it->is_directory() && !folders.contains(p) &&
-            fs::exists(p / "board.json")) {
+        if (p.filename() == "board.json" && !folders.contains(p.parent_path())) {
             stale.push_back(p);
-            it.disable_recursion_pending();
         }
     }
     for (const auto& p : stale) {
-        fs::remove_all(p);
+        fs::remove(p);
+    }
+}
+
+void prune(const fs::path& dir) {
+    std::vector<fs::path> dirs;
+    for (auto it = fs::recursive_directory_iterator(dir);
+         it != fs::recursive_directory_iterator(); ++it) {
+        const fs::path& p = it->path();
+        if (!it->is_directory()) {
+            continue;
+        }
+        if (p.filename().string().starts_with(".") ||
+            (p.filename() == "assets" && p.parent_path() == dir)) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        dirs.push_back(p);
+    }
+    // Deepest first, so a folder emptied by removing its subfolder goes too.
+    std::sort(dirs.begin(), dirs.end(), [](auto& a, auto& b) {
+        return a.string().size() > b.string().size();
+    });
+    for (const auto& p : dirs) {
+        if (fs::is_empty(p)) {
+            fs::remove(p);
+        }
     }
 }
 

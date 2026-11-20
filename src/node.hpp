@@ -54,8 +54,13 @@ struct Node {
     // 0..1 of the shape's box; x < 0: not pinned, aims at the center.
     Vec2 start_at{-1, -1}, end_at{-1, -1};
     uint32_t seed = 1;        // keeps the hand-drawn wobble stable
-    std::vector<std::string> tags; // concepts this node belongs to
-    std::string src;          // made from this .tanuki file (rebuilt from it)
+    std::vector<std::string> tags; // arrows: the flows they are a step of
+    // Markdown pages (pages.hpp). Boxes: the page file ("qargo/_index.md"),
+    // "#" for a `##` section, "" before the first sync. Flow arrows:
+    // "flow:<id>#<n>".
+    std::string mdfile;
+    std::vector<std::string> issues; // "url [title]"
+    bool md = false;                 // in the pages at the last sync
 
     // Runtime only: 0 = label centered, 1 = label is the top-left title.
     // Animated by the renderer when the shape gains or loses contents.

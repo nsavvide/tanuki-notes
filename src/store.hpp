@@ -10,15 +10,20 @@
 // On-disk layout of a map folder (git-friendly: plain text, stable ids):
 //
 //   <map>/board.json             children of the root
-//   <map>/<name>-<id>/board.json children of that node (only if it has any)
+//   <map>/<page>/board.json      children of a box with a page folder;
+//                                other nodes are saved inside their parent
 //   <map>/assets/                 copied images and PDFs
 //   <map>/.view.json              last camera position (gitignored)
 namespace store {
 
 std::unique_ptr<Node> load(const std::filesystem::path& dir);
 
-// Writes only files whose content changed; removes folders of deleted nodes.
+// Writes only files whose content changed; removes board.json files of
+// folders no longer used.
 void save(const Node& root, const std::filesystem::path& dir);
+
+// Removes empty folders (never hidden ones or assets/).
+void prune(const std::filesystem::path& dir);
 
 struct View {
     std::string anchor_id = "root";
