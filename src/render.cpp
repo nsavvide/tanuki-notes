@@ -852,8 +852,16 @@ void draw_subtree(RenderCtx& ctx, const Node& n, Xform t) {
     if (ctx.focus && !ctx.lit.contains(&n)) {
         alpha = 0.12f;
     }
-    if (n.is_linear() && !n.tags.empty() && !ctx.lit.contains(&n)) {
-        return; // flow arrows only show while their flow is picked
+    if (n.is_linear() && !n.tags.empty() && !ctx.glow.contains(&n)) {
+        return; // flow arrows only show while their own flow is picked
+    }
+    if (n.is_linear() && n.kind != Kind::Draw && !ctx.glow.contains(&n)) {
+        // A line from a level far above is a thick smear across this one:
+        // fade it out as its stroke gets past 8 px, gone at 16.
+        alpha *= float(std::clamp((16 - sw) / 8, 0.0, 1.0));
+        if (alpha <= 0) {
+            return;
+        }
     }
 
     if (n.kind != Kind::Root && r.w < 3 && r.h < 3) {

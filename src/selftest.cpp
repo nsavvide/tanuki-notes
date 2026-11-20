@@ -6,6 +6,7 @@
 
 #include "app.hpp"
 #include "code.hpp"
+#include "layout.hpp"
 #include "pages.hpp"
 #include "note.hpp"
 #include "render.hpp"
@@ -857,6 +858,24 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         CHECK(files["x/_index.md"] == page);
     }
 
+    {   // A note that grows pushes what's below it down, and its box grows to fit.
+        auto box = make_node(Kind::Rect);
+        box->w = 1;
+        box->h = 0.5;
+        auto root = make_root();
+        Node& b = add_child(*root, std::move(box));
+        Node& top = add_child(b, make_node(Kind::Text));
+        top.x = 0.1, top.y = 0.1, top.w = 0.8, top.h = 0.1;
+        Node& below = add_child(b, make_node(Kind::Text));
+        below.x = 0.1, below.y = 0.25, below.w = 0.8, below.h = 0.2;
+        Node& beside = add_child(b, make_node(Kind::Rect));
+        beside.x = 0.95, beside.y = 0.25, beside.w = 0.04, beside.h = 0.04;
+        layout::grow(top, 0.3);
+        CHECK(near(top.h, 0.3) && near(below.y, 0.45)); // moved by the 0.2 the note grew
+        CHECK(near(beside.y, 0.25));                     // not under it: stays
+        CHECK(near(b.h, 0.65));                          // box grew to hold `below`
+    }
+
     {   // Map folder <-> pages, both ways.
         fs::path d3 = fs::temp_directory_path() / ("tanuki-pages-" + std::to_string(getpid()));
         fs::remove_all(d3);
@@ -870,7 +889,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
             return std::string(std::istreambuf_iterator<char>(in), {});
         };
         put("_index.md", "A note at the top.\n");
-        put("qargo/_index.md", "# Qargo\n\n## Hasura\n\n-> [[PgDog]]: reads\n\n## PgDog\n");
+        put("qargo/_index.md", "# Qargo\n\n-> [[Hasura]]: into itself, refused\n\n## Hasura\n\n-> [[PgDog]]: reads\n\n## PgDog\n");
         put("README.md", "# Readme\n"); // a page too: the folder is a map
         fs::create_directories(d3 / "flows");
         put("flows/reads.md", "# Reads\n\nHow a read goes.\n\n[[Hasura]] -> [[Qargo > PgDog]]: query\n");
@@ -884,7 +903,8 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
                 }
             }
             CHECK(qargo && qargo->w > 0 && qargo->children.size() == 4); // 2 boxes, arrow, flow step
-            CHECK(app.pages_error().empty());
+            CHECK(app.pages_error().contains("[[Hasura]] is inside it")); // and only that
+            CHECK(app.pages_error().find('\n') == std::string::npos);
             if (qargo && qargo->children.size() == 4) {
                 Node& step = *qargo->children[3];
                 CHECK(step.text == "1. query" && step.tags == std::vector<std::string>{"reads"});

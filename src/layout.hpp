@@ -16,4 +16,8 @@ namespace layout {
 // points get a straight line between their shapes.
 void place_new(NVGcontext* vg, Node& root);
 
+// Makes a placed node taller (in its parent's units), moving what sits below
+// it down by as much and growing its parent if it no longer fits.
+void grow(Node& n, double new_h);
+
 } // namespace layout

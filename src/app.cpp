@@ -419,7 +419,8 @@ void App::reroot() {
         Xform pt = parent_xform(*anchor_, cam_.xform());
         auto& sib = anchor_->parent->children;
         for (size_t i = size_t(index_in_parent(*anchor_)) + 1; i < sib.size(); ++i) {
-            if (covers(screen_rect(*sib[i], child_xform(pt, *sib[i])), win_w_, win_h_)) {
+            if (sib[i]->is_container() &&
+                covers(screen_rect(*sib[i], child_xform(pt, *sib[i])), win_w_, win_h_)) {
                 return true;
             }
         }
@@ -441,7 +442,9 @@ void App::reroot() {
         // Topmost child first: that's the one you see.
         for (auto it = anchor_->children.rbegin(); it != anchor_->children.rend(); ++it) {
             const Node& c = **it;
-            if (covers(screen_rect(c, child_xform(t, c)), win_w_, win_h_)) {
+            // Only shapes that hold things are levels: a long arrow's box can
+            // cover the window too.
+            if (c.is_container() && covers(screen_rect(c, child_xform(t, c)), win_w_, win_h_)) {
                 cam_.x = (cam_.x - c.x) / c.w;
                 cam_.y = (cam_.y - c.y) / c.w;
                 cam_.scale *= c.w;

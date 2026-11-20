@@ -8,6 +8,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -410,8 +411,8 @@ double unit_of(const Node& c) {
     return u[u.size() / 2];
 }
 
-// Makes `c` taller (in its parent's units), moving what sits below it down
-// by as much, and growing its parent in turn if it no longer fits.
+} // namespace
+
 void grow(Node& c, double new_h) {
     if (c.kind == Kind::Root || new_h <= c.h) {
         return;
@@ -433,6 +434,8 @@ void grow(Node& c, double new_h) {
         grow(p, bottom * p.w);
     }
 }
+
+namespace {
 
 void place(Ctx& cx, Node& c) {
     std::vector<Item> items;
@@ -505,24 +508,120 @@ Vec2 outline(const Node& n, Rect r, Vec2 toward, double g) {
     return c + d * std::min(t, 1.0) + d * (g / len);
 }
 
+// Does the segment p-q pass through r?
+bool crosses(Vec2 p, Vec2 q, Rect r) {
+    Vec2 d = q - p;
+    double t0 = 0, t1 = 1;
+    auto clip = [&](double num, double den) { // den * t <= num
+        if (std::abs(den) < 1e-300) {
+            return num >= 0;
+        }
+        double t = num / den;
+        if (den < 0) {
+            t0 = std::max(t0, t);
+        } else {
+            t1 = std::min(t1, t);
+        }
+        return t0 <= t1;
+    };
+    return clip(p.x - r.x, -d.x) && clip(r.right() - p.x, d.x) && clip(p.y - r.y, -d.y) &&
+           clip(r.bottom() - p.y, d.y) && t1 - t0 > 1e-9;
+}
+
 void place_arrow(Node& a, Node& s, Node& e) {
-    if (!is_ancestor(a.parent, &s) || !is_ancestor(a.parent, &e)) {
+    Node* host = a.parent;
+    if (!is_ancestor(host, &s) || !is_ancestor(host, &e)) {
         return;
     }
-    double u = unit_of(*a.parent);
+    double u = unit_of(*host);
     if (u <= 0) {
         u = std::max(s.w, e.w) / 150;
     }
     a.style.stroke_width = stroke * u;
     a.style.font_size = edge_fs * u;
-    Rect rs = rect_in(&s, a.parent), re = rect_in(&e, a.parent);
-    std::vector<Vec2> pts{outline(s, rs, re.center(), 6 * u), outline(e, re, rs.center(), 6 * u)};
-    double x0 = std::min(pts[0].x, pts[1].x), y0 = std::min(pts[0].y, pts[1].y);
+    Rect rs = rect_in(&s, host), re = rect_in(&e, host);
+    Vec2 cs = rs.center(), ce = re.center();
+
+    // Boxes in the way (not the ones the arrow joins, or that hold them):
+    // go around them through one bend, the shortest way that's clear.
+    const Node* hs = child_toward(host, &s);
+    const Node* he = child_toward(host, &e);
+    std::vector<Rect> in_way;
+    for (auto& k : host->children) {
+        if (!k->is_linear() && k.get() != hs && k.get() != he) {
+            in_way.push_back(k->rect());
+        }
+    }
+    auto blocked = [&](Vec2 p, Vec2 q) {
+        return std::any_of(in_way.begin(), in_way.end(), [&](Rect r) { return crosses(p, q, r); });
+    };
+    // Bends stay inside the box holding the arrow (it clips what's outside).
+    double bottom = host->kind == Kind::Root ? 1e300 : host->h / host->w;
+    double right = host->kind == Kind::Root ? 1e300 : 1;
+    auto inside = [&](Vec2 c) { return c.x > 0 && c.x < right && c.y > 0 && c.y < bottom; };
+    auto clear = [&](const std::vector<Vec2>& path) {
+        for (size_t i = 0; i + 1 < path.size(); ++i) {
+            if (blocked(path[i], path[i + 1]) || (i > 0 && !inside(path[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    std::vector<Vec2> via; // bends between the two ends
+    if (blocked(cs, ce)) {
+        // One bend: push the middle sideways, a little more each try.
+        Vec2 mid = (cs + ce) * 0.5, d = ce - cs;
+        double len = std::max(length(d), 1e-300);
+        Vec2 side{-d.y / len, d.x / len};
+        for (int k = 1; k <= 40 && via.empty(); ++k) {
+            for (double sign : {1.0, -1.0}) {
+                Vec2 c = mid + side * (sign * k * len / 16);
+                if (clear({cs, c, ce})) {
+                    via = {c};
+                    break;
+                }
+            }
+        }
+        // Two bends: down (or up, left, right), past the boxes in the way, and back.
+        double m = 24 * u, lo = -1e300, hi = 1e300, l = 1e300, r = -1e300;
+        for (Rect o : in_way) {
+            lo = std::max(lo, o.bottom());
+            hi = std::min(hi, o.y);
+            l = std::min(l, o.x);
+            r = std::max(r, o.right());
+        }
+        std::vector<std::vector<Vec2>> routes{
+            {{cs.x, lo + m}, {ce.x, lo + m}}, {{cs.x, hi - m}, {ce.x, hi - m}},
+            {{l - m, cs.y}, {l - m, ce.y}}, {{r + m, cs.y}, {r + m, ce.y}}};
+        double best = 1e300;
+        for (auto& route : routes) {
+            if (!via.empty()) {
+                break;
+            }
+            std::vector<Vec2> path{cs, route[0], route[1], ce};
+            double plen = length(route[0] - cs) + length(route[1] - route[0]) + length(ce - route[1]);
+            if (plen < best && clear(path)) {
+                best = plen;
+                via = route;
+            }
+        }
+    }
+    std::vector<Vec2> pts{outline(s, rs, via.empty() ? ce : via.front(), 6 * u)};
+    pts.insert(pts.end(), via.begin(), via.end());
+    pts.push_back(outline(e, re, via.empty() ? cs : via.back(), 6 * u));
+
+    double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+    for (Vec2 p : pts) {
+        x0 = std::min(x0, p.x);
+        y0 = std::min(y0, p.y);
+        x1 = std::max(x1, p.x);
+        y1 = std::max(y1, p.y);
+    }
     double pd = a.style.stroke_width / 2;
     a.x = x0 - pd;
     a.y = y0 - pd;
-    a.w = std::abs(pts[1].x - pts[0].x) + 2 * pd;
-    a.h = std::abs(pts[1].y - pts[0].y) + 2 * pd;
+    a.w = x1 - x0 + 2 * pd;
+    a.h = y1 - y0 + 2 * pd;
     a.points.clear();
     for (Vec2 p : pts) {
         a.points.push_back({(p.x - a.x) / a.w, (p.y - a.y) / a.h});

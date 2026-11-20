@@ -299,10 +299,18 @@ void App::load_pages(bool startup) {
             if (note->text != pn.text || note->lang != lang) {
                 note->text = pn.text;
                 note->lang = lang;
-                if (note->w > 0 && kind == Kind::Text) {
-                    fit_text_bounds(vg_, *note);
-                } else if (note->w > 0) {
-                    fit_code_bounds(vg_, *note);
+                if (note->w > 0) {
+                    double old_h = note->h;
+                    if (kind == Kind::Text) {
+                        fit_text_bounds(vg_, *note);
+                    } else {
+                        fit_code_bounds(vg_, *note);
+                    }
+                    if (note->h > old_h) { // longer now: push what's below it down
+                        double new_h = note->h;
+                        note->h = old_h;
+                        layout::grow(*note, new_h);
+                    }
                 }
             }
             note->md = true;
@@ -345,10 +353,16 @@ void App::load_pages(bool startup) {
             auto& old = old_links[owner];
             for (const auto& l : b->links) {
                 Node* to = resolve(l.target, owner, boxes);
+                std::string from = owner->text.empty() ? "top level" : first_line(owner->text);
                 if (!to || to == owner || owner->kind == Kind::Root) {
-                    problems.push_back(std::format("{}: no box called [[{}]]",
-                                                   owner->text.empty() ? "top level" : first_line(owner->text),
-                                                   l.target));
+                    problems.push_back(std::format("{}: no box called [[{}]]", from, l.target));
+                    continue;
+                }
+                if (is_ancestor(owner, to) || is_ancestor(to, owner)) {
+                    // It would start or end inside its own box and float there.
+                    problems.push_back(std::format("{}: [[{}]] is inside it (or holds it); arrows join "
+                                                   "boxes side by side",
+                                                   from, l.target));
                     continue;
                 }
                 auto it = std::find_if(old.begin(), old.end(),
