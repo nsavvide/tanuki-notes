@@ -226,9 +226,18 @@ void App::load_pages(bool startup) {
     }
     pages::Map m = pages::read(dir_);
     page_stamps_ = pages::stamps(dir_);
-    for (const auto& [f, _] : page_stamps_) {
-        known_pages_.insert(f);
-    }
+    // Only pages read() parsed are ours to delete. stamps() also lists .md
+    // files read() skips (a folder without _index.md, e.g. daily/), and those
+    // must never be deleted.
+    std::function<void(const pages::Box&)> known = [&](const pages::Box& b) {
+        if (!b.file.empty()) {
+            known_pages_.insert(b.file);
+        }
+        for (const auto& k : b.kids) {
+            known(k);
+        }
+    };
+    known(m.root);
     flows_ = m.flows;
     std::string anchor_id = anchor_->id;
     selection_.clear();

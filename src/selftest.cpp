@@ -893,6 +893,8 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         put("README.md", "# Readme\n"); // a page too: the folder is a map
         fs::create_directories(d3 / "flows");
         put("flows/reads.md", "# Reads\n\nHow a read goes.\n\n[[Hasura]] -> [[Qargo > PgDog]]: query\n");
+        fs::create_directories(d3 / "daily"); // no _index.md: not pages, never deleted
+        put("daily/2026-01-01.md", "# Daily\n");
         {
             App app(vg, window, d3);
             tick(app);
@@ -935,6 +937,7 @@ int run_selftest(NVGcontext* vg, SDL_Window* window) {
         }
         CHECK(fs::exists(d3 / "qargo" / "board.json"));
         CHECK(get("README.md") == "# Readme\n");
+        CHECK(get("daily/2026-01-01.md") == "# Daily\n");
         fs::remove_all(d3);
 
         // A folder that isn't a map: drawing in it never deletes its README.
